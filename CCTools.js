@@ -5,17 +5,22 @@
  * do DevTools (F12 > Console), cole todo o conteudo deste arquivo e pressione Enter. Vai
  * aparecer um botao flutuante no canto inferior direito da tela com um menu de ferramentas:
  *
- *  1. Copiar modulos entre servicos   (substitui CopiarModulos.js; antes de copiar, valida
- *                                      cada chapa/fita do modulo contra o catalogo da central
- *                                      de destino - a que nao existir la e deixada em branco
- *                                      no modulo copiado, em vez de manter um id invalido que
- *                                      trava o carregamento do modulo depois; o relatorio da
- *                                      copia lista modulo, slot e id de cada material removido)
+ *  1. Copiar modulos entre servicos   (substitui CopiarModulos.js; escolha "Todos os modulos"
+ *                                      ou um modulo especifico da origem para copiar - util
+ *                                      para atualizar so um modulo sem recopiar tudo. Antes de
+ *                                      copiar, valida cada chapa/fita do modulo contra o
+ *                                      catalogo da central de destino - a que nao existir la e
+ *                                      deixada em branco no modulo copiado, em vez de manter um
+ *                                      id invalido que trava o carregamento do modulo depois; o
+ *                                      relatorio da copia lista modulo, slot e id removido)
  *  2. Copiar configuracao de ambiente (substitui CopiarAmbiente.js)
  *  3. Pecas do modulo atual           (novo - lista as pecas do modulo aberto para edicao,
  *                                      calculadas localmente a partir da geometria do modulo)
  *  4. Trocar chapa e fita do modulo   (novo - copia a chapa/fita escolhida numa aplicacao do
  *                                      modulo, ex. Corpo, para todas as outras aplicacoes)
+ *  5. Limpar modulos do servico       (novo - apaga todos os modulos de um servico escolhido,
+ *                                      com confirmacao mostrando quantos serao removidos - util
+ *                                      antes de recopiar tudo depois de ajustar a origem)
  *
  * Todos os popups compartilham a mesma identidade visual: cabecalho com titulo e um botao
  * "x" no canto superior direito para fechar, e uma alca no canto inferior esquerdo que pode
@@ -365,6 +370,8 @@
     return avisos;
   }
 
+  var COPIAR_TODOS = '__todos__';
+
   function toolCopiarModulos() {
     var popup = createPopup({ key: 'copiar-modulos', title: 'Copiar módulos entre serviços', width: 460 });
     popup.body.innerHTML = '<p class="' + NS + '-sub">Carregando lista de serviços...</p>';
@@ -373,15 +380,18 @@
       var optionsHtml = '<option value="">Selecione um serviço...</option>' + buildServiceOptionsHtml(lista);
 
       popup.body.innerHTML =
-        '<p class="' + NS + '-sub">Copia todos os módulos de um serviço já configurado para outro serviço.</p>' +
+        '<p class="' + NS + '-sub">Copia módulos de um serviço já configurado para outro serviço.</p>' +
         '<label class="' + NS + '-field">Serviço de ORIGEM (já tem os módulos)</label>' +
         '<select class="' + NS + '-input" id="cct-cm-origem">' + optionsHtml + '</select>' +
-        '<label class="' + NS + '-field">Serviço de DESTINO (vai receber os módulos)</label>' +
+        '<label class="' + NS + '-field">Módulo a copiar</label>' +
+        '<select class="' + NS + '-input" id="cct-cm-modulo" disabled><option value="">Selecione a origem primeiro...</option></select>' +
+        '<label class="' + NS + '-field">Serviço de DESTINO (vai receber o(s) módulo(s))</label>' +
         '<select class="' + NS + '-input" id="cct-cm-destino">' + optionsHtml + '</select>' +
         '<button type="button" class="' + NS + '-btn" id="cct-cm-run">Copiar</button>';
 
       var log = setupLog(popup.body);
       var $origem = popup.body.querySelector('#cct-cm-origem');
+      var $modulo = popup.body.querySelector('#cct-cm-modulo');
       var $destino = popup.body.querySelector('#cct-cm-destino');
       var $run = popup.body.querySelector('#cct-cm-run');
       var busy = false, completed = false;
@@ -390,16 +400,49 @@
         busy = value;
         $run.disabled = value;
         $origem.disabled = value;
+        $modulo.disabled = value;
         $destino.disabled = value;
         $run.textContent = label || (value ? 'Copiando...' : 'Copiar');
       }
 
-      function run(origemId, destinoId) {
+      $origem.addEventListener('change', function () {
+        var origemId = $origem.value;
+        if (!origemId) {
+          $modulo.innerHTML = '<option value="">Selecione a origem primeiro...</option>';
+          $modulo.disabled = true;
+          return;
+        }
+        $modulo.innerHTML = '<option value="">Carregando módulos...</option>';
+        $modulo.disabled = true;
+        gotoHash(HASH_PREFIX + origemId, findProjectListScope).then(function (origemScope) {
+          var modulos = origemScope.project.modules;
+          if (!modulos.length) {
+            $modulo.innerHTML = '<option value="">Este serviço não tem módulos</option>';
+            return;
+          }
+          var opts = '<option value="' + COPIAR_TODOS + '">Todos os módulos (' + modulos.length + ')</option>' +
+            modulos.map(function (mm) {
+              return '<option value="' + mm.uuid + '">' + escapeHtml(mm.name) +
+                (mm.furniture ? ' (' + escapeHtml(mm.furniture) + ')' : '') + '</option>';
+            }).join('');
+          $modulo.innerHTML = opts;
+          $modulo.disabled = false;
+        }).catch(function (err) {
+          $modulo.innerHTML = '<option value="">Erro ao carregar módulos</option>';
+          log('Erro ao carregar módulos da origem: ' + (err && err.message ? err.message : err), NS + '-err');
+        });
+      });
+
+      function run(origemId, moduloId, destinoId) {
         log('Abrindo serviço de origem #' + origemId + '...');
         return gotoHash(HASH_PREFIX + origemId, findProjectListScope).then(function (origemScope) {
           var modulos = origemScope.project.modules;
+          if (moduloId !== COPIAR_TODOS) {
+            modulos = modulos.filter(function (mm) { return mm.uuid === moduloId; });
+            if (!modulos.length) throw new Error('O módulo selecionado não foi encontrado na origem (pode ter sido removido ou renomeado).');
+          }
           if (!modulos.length) throw new Error('O serviço de origem #' + origemId + ' não tem nenhum módulo.');
-          log('Encontrados ' + modulos.length + ' módulo(s) na origem.');
+          log('Encontrados ' + modulos.length + ' módulo(s) para copiar.');
           var copias = modulos.map(cleanModuleForCopy);
 
           log('Abrindo serviço de destino #' + destinoId + '...');
@@ -434,13 +477,15 @@
         if (completed) { popup.close(); return; }
 
         var origemId = $origem.value;
+        var moduloId = $modulo.value;
         var destinoId = $destino.value;
         if (!origemId || !destinoId) { log('Selecione o serviço de origem e o de destino.', NS + '-err'); return; }
+        if (!moduloId) { log('Selecione qual módulo copiar (ou "Todos os módulos").', NS + '-err'); return; }
         if (origemId === destinoId) { log('Origem e destino precisam ser serviços diferentes.', NS + '-err'); return; }
 
         setBusy(true);
         log('Iniciando cópia de #' + origemId + ' para #' + destinoId + '...');
-        run(origemId, destinoId).then(function (resultado) {
+        run(origemId, moduloId, destinoId).then(function (resultado) {
           log(resultado.total + ' módulo(s) copiado(s) com sucesso para o serviço #' + destinoId + '.', NS + '-ok');
           if (resultado.avisos.length) {
             log(resultado.avisos.length + ' material(is) não existiam na central de destino e foram deixados em branco para reatribuição manual:', NS + '-warn');
@@ -818,6 +863,94 @@
   }
 
   // ==========================================================================
+  // Ferramenta 5: Limpar modulos do servico
+  // ==========================================================================
+  //
+  // Apaga todos os modulos de um servico. Util para atualizar um servico: apaga
+  // tudo, ajusta a origem, e copia de novo com a ferramenta "Copiar modulos".
+  // Pede confirmacao explicita (mostrando quantos modulos serao removidos) antes
+  // de executar, ja que e uma acao dificil de reverter.
+
+  function toolLimparModulos() {
+    var popup = createPopup({ key: 'limpar-modulos', title: 'Limpar módulos do serviço', width: 440 });
+    popup.body.innerHTML = '<p class="' + NS + '-sub">Carregando lista de serviços...</p>';
+
+    fetchServicesList().then(function (lista) {
+      var optionsHtml = '<option value="">Selecione um serviço...</option>' + buildServiceOptionsHtml(lista);
+
+      popup.body.innerHTML =
+        '<p class="' + NS + '-sub ' + NS + '-warn">Remove TODOS os módulos do serviço selecionado. Use antes de recopiar tudo depois de um ajuste na origem.</p>' +
+        '<label class="' + NS + '-field">Serviço</label>' +
+        '<select class="' + NS + '-input" id="cct-lm-servico">' + optionsHtml + '</select>' +
+        '<button type="button" class="' + NS + '-btn" id="cct-lm-check">Verificar módulos</button>' +
+        '<div id="cct-lm-confirm"></div>';
+
+      var log = setupLog(popup.body);
+      var $servico = popup.body.querySelector('#cct-lm-servico');
+      var $check = popup.body.querySelector('#cct-lm-check');
+      var $confirmArea = popup.body.querySelector('#cct-lm-confirm');
+      var busy = false;
+
+      $check.addEventListener('click', function () {
+        if (busy) return;
+        var servicoId = $servico.value;
+        if (!servicoId) { log('Selecione um serviço.', NS + '-err'); return; }
+
+        busy = true;
+        $check.disabled = true;
+        $servico.disabled = true;
+        $confirmArea.innerHTML = '';
+        log('Abrindo serviço #' + servicoId + '...');
+
+        gotoHash(HASH_PREFIX + servicoId, findProjectListScope).then(function (scope) {
+          busy = false;
+          $check.disabled = false;
+          $servico.disabled = false;
+
+          var total = scope.project.modules.length;
+          if (!total) {
+            log('O serviço #' + servicoId + ' já não tem módulos.', NS + '-ok');
+            return;
+          }
+          log(total + ' módulo(s) encontrado(s) no serviço #' + servicoId + '.', NS + '-warn');
+
+          var btn = document.createElement('button');
+          btn.type = 'button';
+          btn.className = NS + '-btn';
+          btn.style.background = '#b3261e';
+          btn.textContent = 'Apagar ' + total + ' módulo(s) deste serviço';
+          $confirmArea.appendChild(btn);
+
+          btn.addEventListener('click', function () {
+            btn.disabled = true;
+            $servico.disabled = true;
+            btn.textContent = 'Apagando...';
+            scope.project.modules.splice(0, scope.project.modules.length);
+            Promise.resolve(scope.save({ generate: false })).then(function () {
+              log('Todos os módulos do serviço #' + servicoId + ' foram removidos e salvos.', NS + '-ok');
+              $confirmArea.innerHTML = '';
+              $servico.disabled = false;
+            }).catch(function (err) {
+              log('Erro ao salvar: ' + (err && err.message ? err.message : err), NS + '-err');
+              btn.disabled = false;
+              $servico.disabled = false;
+              btn.textContent = 'Tentar novamente';
+            });
+          });
+        }).catch(function (err) {
+          busy = false;
+          $check.disabled = false;
+          $servico.disabled = false;
+          log('Erro: ' + (err && err.message ? err.message : err), NS + '-err');
+        });
+      });
+    }).catch(function (err) {
+      popup.body.innerHTML = '<p class="' + NS + '-sub ' + NS + '-err">Não consegui carregar a lista de serviços: ' +
+        escapeHtml(err && err.message ? err.message : err) + '</p>';
+    });
+  }
+
+  // ==========================================================================
   // Menu flutuante (launcher)
   // ==========================================================================
 
@@ -833,6 +966,7 @@
     '  <div class="' + NS + '-menu-item" data-tool="ambiente">Copiar configuração de ambiente</div>' +
     '  <div class="' + NS + '-menu-item" data-tool="pecas">Peças do módulo atual</div>' +
     '  <div class="' + NS + '-menu-item" data-tool="material">Trocar chapa e fita do módulo</div>' +
+    '  <div class="' + NS + '-menu-item" data-tool="limpar">Limpar módulos do serviço</div>' +
     '</div>' +
     '<button type="button" class="' + NS + '-launcher-btn" title="Ferramentas Cortecloud">Tools Menu</button>';
   document.body.appendChild(launcher);
@@ -848,7 +982,7 @@
     if (!launcher.contains(ev.target)) menu.classList.remove(NS + '-open');
   });
 
-  var TOOLS = { modulos: toolCopiarModulos, ambiente: toolCopiarAmbiente, pecas: toolPecasDoModulo, material: toolTrocarMaterial };
+  var TOOLS = { modulos: toolCopiarModulos, ambiente: toolCopiarAmbiente, pecas: toolPecasDoModulo, material: toolTrocarMaterial, limpar: toolLimparModulos };
   menu.querySelectorAll('.' + NS + '-menu-item').forEach(function (item) {
     item.addEventListener('click', function () {
       menu.classList.remove(NS + '-open');
