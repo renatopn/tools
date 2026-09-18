@@ -5,7 +5,12 @@
  * do DevTools (F12 > Console), cole todo o conteudo deste arquivo e pressione Enter. Vai
  * aparecer um botao flutuante no canto inferior direito da tela com um menu de ferramentas:
  *
- *  1. Copiar modulos entre servicos   (substitui CopiarModulos.js)
+ *  1. Copiar modulos entre servicos   (substitui CopiarModulos.js; antes de copiar, valida
+ *                                      cada chapa/fita do modulo contra o catalogo da central
+ *                                      de destino - a que nao existir la e deixada em branco
+ *                                      no modulo copiado, em vez de manter um id invalido que
+ *                                      trava o carregamento do modulo depois; o relatorio da
+ *                                      copia lista modulo, slot e id de cada material removido)
  *  2. Copiar configuracao de ambiente (substitui CopiarAmbiente.js)
  *  3. Pecas do modulo atual           (novo - lista as pecas do modulo aberto para edicao,
  *                                      calculadas localmente a partir da geometria do modulo)
@@ -279,6 +284,68 @@
     return clone;
   }
 
+  // Slots de material conhecidos pelo painel "Chapas e fitas" (module.preferences.c/f).
+  // Outros slots (ex: chapa_gavetas, chapa_frentes) existem em hash.attributes mas nao
+  // tem um slot equivalente em preferences - so da pra limpar o hash para esses.
+  var KNOWN_APLICACOES = ['corpo', 'fundo', 'divisoria', 'travessas', 'tamponamento'];
+
+  function fetchCompanyCatalog(companyId) {
+    var injector = angular.element(document.body).injector();
+    var $http = injector.get('$http');
+    return Promise.all([
+      $http.get('https://next.cortecloud.com.br/api/core/boards/companies/' + companyId).then(function (r) { return r.data; }),
+      $http.get('https://next.cortecloud.com.br/api/core/edges/companies/' + companyId).then(function (r) { return r.data; })
+    ]).then(function (results) {
+      return {
+        boardIds: results[0].reduce(function (set, b) { set[b.id] = true; return set; }, {}),
+        edgeIds: results[1].reduce(function (set, e) { set[e.id] = true; return set; }, {})
+      };
+    });
+  }
+
+  function limparPreferenciaMaterial(modulo, tipo, chave) {
+    var pref = modulo.preferences && modulo.preferences[tipo];
+    if (pref && pref[chave]) {
+      pref[chave].id = null;
+      pref[chave].textura = null;
+      pref[chave].descricao = null;
+      pref[chave].tag = null;
+    }
+  }
+
+  // Remove do modulo clonado qualquer chapa/fita cujo id nao exista no catalogo da
+  // central de destino, deixando o slot vazio (mesmo padrao que a Cortecloud ja usa
+  // para slots nao definidos) em vez de deixar um id invalido que trava o carregamento
+  // do modulo. Retorna a lista de avisos gerados para este modulo.
+  function validarMateriaisModulo(modulo, catalog) {
+    var avisos = [];
+    var attrs = modulo.hash && modulo.hash.attributes;
+    if (!attrs) return avisos;
+    Object.keys(attrs).forEach(function (key) {
+      var val = attrs[key];
+      if (!val) return;
+      var isChapa = key.indexOf('chapa_') === 0;
+      var isFita = key.indexOf('fita_') === 0;
+      if (!isChapa && !isFita) return;
+
+      var valido = isChapa ? catalog.boardIds[val] : catalog.edgeIds[val];
+      if (valido) return;
+
+      attrs[key] = '';
+      var chave = key.replace(/^chapa_|^fita_/, '');
+      if (KNOWN_APLICACOES.indexOf(chave) !== -1) {
+        limparPreferenciaMaterial(modulo, isChapa ? 'c' : 'f', chave);
+      }
+      avisos.push({
+        modulo: modulo.name,
+        tipo: isChapa ? 'chapa' : 'fita',
+        slot: key,
+        id: val
+      });
+    });
+    return avisos;
+  }
+
   function toolCopiarModulos() {
     var popup = createPopup({ key: 'copiar-modulos', title: 'Copiar módulos entre serviços', width: 420 });
     popup.body.innerHTML =
@@ -313,15 +380,27 @@
 
         log('Abrindo serviço de destino #' + destinoId + '...');
         return gotoHash(HASH_PREFIX + destinoId, findProjectListScope).then(function (destinoScope) {
-          var injector = angular.element(document.body).injector();
-          var Modulo = injector.get('Modulo');
-          copias.forEach(function (dados, i) {
-            destinoScope.project.modules.push(new Modulo(dados));
-            log('  + [' + (i + 1) + '/' + copias.length + '] ' + (dados.name || dados.id) +
-              (dados.furniture ? ' (' + dados.furniture + ')' : ''));
+          var companyId = destinoScope.project.companyId;
+          log('Consultando catálogo de chapas/fitas da central de destino (empresa #' + companyId + ')...');
+
+          return fetchCompanyCatalog(companyId).then(function (catalog) {
+            var avisos = [];
+            copias.forEach(function (dados) {
+              avisos = avisos.concat(validarMateriaisModulo(dados, catalog));
+            });
+
+            var injector = angular.element(document.body).injector();
+            var Modulo = injector.get('Modulo');
+            copias.forEach(function (dados, i) {
+              destinoScope.project.modules.push(new Modulo(dados));
+              log('  + [' + (i + 1) + '/' + copias.length + '] ' + (dados.name || dados.id) +
+                (dados.furniture ? ' (' + dados.furniture + ')' : ''));
+            });
+            log('Salvando serviço de destino #' + destinoId + '...');
+            return Promise.resolve(destinoScope.save({ generate: false })).then(function () {
+              return { total: copias.length, avisos: avisos };
+            });
           });
-          log('Salvando serviço de destino #' + destinoId + '...');
-          return Promise.resolve(destinoScope.save({ generate: false })).then(function () { return copias.length; });
         });
       });
     }
@@ -337,9 +416,16 @@
 
       setBusy(true);
       log('Iniciando cópia de #' + origemId + ' para #' + destinoId + '...');
-      run(origemId, destinoId).then(function (total) {
-        log(total + ' módulo(s) copiado(s) com sucesso para o serviço #' + destinoId + '.', NS + '-ok');
-        log('Revise o serviço de destino: módulos com chapa/fita que não existe na central de destino podem precisar de ajuste manual de material.', NS + '-warn');
+      run(origemId, destinoId).then(function (resultado) {
+        log(resultado.total + ' módulo(s) copiado(s) com sucesso para o serviço #' + destinoId + '.', NS + '-ok');
+        if (resultado.avisos.length) {
+          log(resultado.avisos.length + ' material(is) não existiam na central de destino e foram deixados em branco para reatribuição manual:', NS + '-warn');
+          resultado.avisos.forEach(function (a) {
+            log('  ! ' + a.modulo + ': ' + a.tipo + ' "' + a.slot + '" (id ' + a.id + ' indisponível nesta central)', NS + '-warn');
+          });
+        } else {
+          log('Todos os materiais dos módulos copiados existem na central de destino.', NS + '-ok');
+        }
         completed = true;
         setBusy(false, 'Concluído (clique para fechar)');
       }).catch(function (err) {
