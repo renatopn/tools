@@ -1,5 +1,5 @@
 /**
- * CortecloudTools.js
+ * CCTools.js
  *
  * Uso: dentro de qualquer tela da Cortecloud (marceneiro.cortecloud.com.br), abra o Console
  * do DevTools (F12 > Console), cole todo o conteudo deste arquivo e pressione Enter. Vai
