@@ -1,0 +1,737 @@
+/**
+ * CortecloudTools.js
+ *
+ * Uso: dentro de qualquer tela da Cortecloud (marceneiro.cortecloud.com.br), abra o Console
+ * do DevTools (F12 > Console), cole todo o conteudo deste arquivo e pressione Enter. Vai
+ * aparecer um botao flutuante no canto inferior direito da tela com um menu de ferramentas:
+ *
+ *  1. Copiar modulos entre servicos   (substitui CopiarModulos.js)
+ *  2. Copiar configuracao de ambiente (substitui CopiarAmbiente.js)
+ *  3. Pecas do modulo atual           (novo - lista as pecas do modulo aberto para edicao,
+ *                                      calculadas localmente a partir da geometria do modulo)
+ *  4. Trocar chapa e fita do modulo   (novo - copia a chapa/fita escolhida numa aplicacao do
+ *                                      modulo, ex. Corpo, para todas as outras aplicacoes)
+ *
+ * Todos os popups compartilham a mesma identidade visual: cabecalho com titulo e um botao
+ * "x" no canto superior direito para fechar, e uma alca no canto inferior esquerdo que pode
+ * ser arrastada para redimensionar o popup.
+ *
+ * Sobre a ferramenta "Pecas do modulo atual": ela le module.hash.children (a arvore de
+ * geometria do modulo, recalculada 100% no navegador toda vez que voce muda largura/altura/
+ * profundidade). Por isso funciona mesmo com o servico ainda em "Projetando" e reflete
+ * edicoes ainda nao salvas - diferente da tela "Lista de pecas" da Cortecloud, que so mostra
+ * dados depois que os modulos sao finalizados. Em troca, ela mostra uma tabela simples
+ * (C, L, funcao, lados com fita) em vez do popup nativo com desenho, ja que os dados dessa
+ * arvore nao tem o mesmo formato exigido pelo popup nativo.
+ *
+ * So funciona colado dentro da propria aba da Cortecloud (acessa o AngularJS da pagina).
+ */
+(function () {
+  'use strict';
+
+  if (typeof angular === 'undefined') {
+    window.alert('Nao encontrei o AngularJS nesta pagina. Abra a Cortecloud (marceneiro.cortecloud.com.br) e tente novamente.');
+    return;
+  }
+
+  var NS = 'cct';
+  var HASH_PREFIX = '#/hellomobweb/';
+
+  // ==========================================================================
+  // Estilos compartilhados (identidade visual unica para todos os popups)
+  // ==========================================================================
+
+  if (!document.getElementById(NS + '-style')) {
+    var style = document.createElement('style');
+    style.id = NS + '-style';
+    style.textContent =
+      '.' + NS + '-launcher{position:fixed;bottom:24px;left:96px;z-index:999990;font-family:Arial,Helvetica,sans-serif;}' +
+      '.' + NS + '-launcher-btn{height:40px;padding:0 18px;border-radius:20px;background:#2f6fa8;color:#fff;' +
+        'border:none;box-shadow:0 4px 14px rgba(0,0,0,.35);cursor:pointer;font-size:13px;font-weight:bold;' +
+        'letter-spacing:.02em;white-space:nowrap;}' +
+      '.' + NS + '-launcher-btn:hover{background:#265a89;}' +
+      '.' + NS + '-menu{position:absolute;bottom:62px;left:0;background:#fff;border-radius:8px;' +
+        'box-shadow:0 8px 30px rgba(0,0,0,.3);min-width:240px;overflow:hidden;display:none;}' +
+      '.' + NS + '-menu.' + NS + '-open{display:block;}' +
+      '.' + NS + '-menu-item{padding:12px 16px;font-size:13px;color:#243746;cursor:pointer;border-bottom:1px solid #eef1f2;}' +
+      '.' + NS + '-menu-item:last-child{border-bottom:none;}' +
+      '.' + NS + '-menu-item:hover{background:#f4f6f7;}' +
+      '.' + NS + '-menu-title{padding:10px 16px;font-size:11px;text-transform:uppercase;letter-spacing:.04em;' +
+        'color:#8a99a3;background:#f8f9fa;}' +
+
+      '.' + NS + '-panel{position:fixed;background:#fff;border-radius:8px;box-shadow:0 12px 40px rgba(0,0,0,.35);' +
+        'font-family:Arial,Helvetica,sans-serif;font-size:13px;color:#243746;display:flex;flex-direction:column;' +
+        'z-index:999995;min-width:320px;min-height:160px;max-width:92vw;max-height:85vh;}' +
+      '.' + NS + '-header{display:flex;align-items:center;justify-content:space-between;padding:12px 14px;' +
+        'border-bottom:1px solid #eef1f2;cursor:default;flex:0 0 auto;}' +
+      '.' + NS + '-title{font-size:15px;font-weight:bold;color:#243746;margin:0;}' +
+      '.' + NS + '-close{border:none;background:none;font-size:20px;line-height:1;color:#8a99a3;cursor:pointer;padding:0 4px;}' +
+      '.' + NS + '-close:hover{color:#b3261e;}' +
+      '.' + NS + '-body{padding:14px;overflow:auto;flex:1 1 auto;min-height:0;}' +
+      '.' + NS + '-resize{position:absolute;width:16px;height:16px;}' +
+      '.' + NS + '-resize-bl{left:0;bottom:0;cursor:sw-resize;}' +
+      '.' + NS + '-resize-bl::before{content:"";position:absolute;left:4px;bottom:4px;width:8px;height:8px;' +
+        'border-left:2px solid #cfd8dc;border-bottom:2px solid #cfd8dc;}' +
+      '.' + NS + '-resize-tl{left:0;top:0;cursor:nwse-resize;}' +
+      '.' + NS + '-resize-tl::before{content:"";position:absolute;left:4px;top:4px;width:8px;height:8px;' +
+        'border-left:2px solid #cfd8dc;border-top:2px solid #cfd8dc;}' +
+
+      '.' + NS + '-sub{margin:0 0 12px;font-size:12px;color:#6b7a85;}' +
+      '.' + NS + '-field{display:block;font-size:12px;color:#3a4a54;margin:10px 0 4px;}' +
+      '.' + NS + '-input{width:100%;box-sizing:border-box;padding:8px 10px;border:1px solid #cfd8dc;border-radius:4px;font-size:14px;}' +
+      '.' + NS + '-input-wrap{position:relative;margin-top:10px;}' +
+      '.' + NS + '-input-wrap .' + NS + '-input{padding-right:28px;}' +
+      '.' + NS + '-input-clear{position:absolute;right:4px;top:50%;transform:translateY(-50%);border:none;' +
+        'background:none;color:#8a99a3;font-size:16px;line-height:1;cursor:pointer;padding:4px 6px;}' +
+      '.' + NS + '-input-clear:hover{color:#b3261e;}' +
+      '.' + NS + '-btn{margin-top:14px;width:100%;padding:10px;border:none;border-radius:4px;background:#2f6fa8;' +
+        'color:#fff;font-size:14px;cursor:pointer;}' +
+      '.' + NS + '-btn:disabled{background:#9db6c7;cursor:default;}' +
+      '.' + NS + '-info{background:#f4f6f7;border:1px solid #e1e6e8;border-radius:4px;padding:8px 10px;' +
+        'font-size:13px;color:#243746;margin-bottom:14px;}' +
+      '.' + NS + '-info b{color:#2f6fa8;}' +
+      '.' + NS + '-log{margin-top:14px;max-height:220px;overflow-y:auto;background:#f4f6f7;border:1px solid #e1e6e8;' +
+        'border-radius:4px;padding:8px 10px;font-size:12px;color:#3a4a54;white-space:pre-wrap;display:none;}' +
+      '.' + NS + '-log.' + NS + '-visible{display:block;}' +
+      '.' + NS + '-warn{color:#a15c00;}' +
+      '.' + NS + '-err{color:#b3261e;}' +
+      '.' + NS + '-ok{color:#1e7a34;}' +
+
+      '.' + NS + '-table{width:100%;border-collapse:collapse;font-size:12px;}' +
+      '.' + NS + '-table th{text-align:left;border-bottom:1px solid #ddd;padding:5px 6px;color:#6b7a85;font-weight:normal;}' +
+      '.' + NS + '-table td{padding:5px 6px;border-bottom:1px solid #f0f0f0;}';
+    document.head.appendChild(style);
+  }
+
+  // ==========================================================================
+  // Utilidades gerais
+  // ==========================================================================
+
+  function sleep(ms) {
+    return new Promise(function (resolve) { setTimeout(resolve, ms); });
+  }
+
+  function findScopeByHeadingText(texts) {
+    var all = document.querySelectorAll('*');
+    for (var i = 0; i < all.length; i++) {
+      var el = all[i];
+      if (el.children.length === 0 && texts.indexOf(el.textContent.trim()) !== -1) {
+        var scope = angular.element(el).scope();
+        if (scope) return scope;
+      }
+    }
+    return null;
+  }
+
+  function findProjectListScope() {
+    var s = findScopeByHeadingText(['Módulos neste projeto', 'Modulos neste projeto']);
+    if (s && s.project && Array.isArray(s.project.modules)) return s;
+    return null;
+  }
+
+  function findEnvironmentScope() {
+    var root = angular.element(document.body).scope().$root;
+    var target = null;
+    (function walk(scope) {
+      if (!scope || target) return;
+      var keys = Object.keys(scope).filter(function (k) { return k.indexOf('$') !== 0; });
+      if (keys.indexOf('ambiente') !== -1 && keys.indexOf('project') !== -1) { target = scope; return; }
+      var child = scope.$$childHead;
+      while (child) { walk(child); if (target) return; child = child.$$nextSibling; }
+    })(root);
+    return target;
+  }
+
+  function findActiveModuloScope() {
+    // O painel de edicao do modulo guarda o modulo atual em "module" (ingles), diferente
+    // do item da lista de modulos, que usa "modulo" (portugues).
+    var s = findScopeByHeadingText(['Dimensões', 'Dimensoes']);
+    while (s && !s.module) s = s.$parent;
+    return (s && s.module) ? s : null;
+  }
+
+  function gotoHash(hash, readyCheck, timeoutMs) {
+    timeoutMs = timeoutMs || 20000;
+    window.location.hash = hash;
+    var start = Date.now();
+    return sleep(700).then(function poll() {
+      var result = readyCheck();
+      if (result) return result;
+      if (Date.now() - start > timeoutMs) {
+        throw new Error('Tempo esgotado esperando carregar "' + hash + '".');
+      }
+      return sleep(300).then(poll);
+    });
+  }
+
+  // ==========================================================================
+  // Shell de popup compartilhado
+  // ==========================================================================
+
+  var openPanels = {};
+
+  function createPopup(opts) {
+    opts = opts || {};
+    var key = opts.key || ('p' + Math.random().toString(36).slice(2));
+    var existing = openPanels[key];
+    if (existing && existing.el && existing.el.parentNode) existing.el.remove();
+
+    var cascade = Object.keys(openPanels).length % 6;
+    var panel = document.createElement('div');
+    panel.className = NS + '-panel';
+    panel.style.width = (opts.width || 420) + 'px';
+    panel.style.height = (opts.height || 'auto');
+    panel.style.top = (70 + cascade * 24) + 'px';
+    panel.style.right = (24 + cascade * 24) + 'px';
+
+    panel.innerHTML =
+      '<div class="' + NS + '-header">' +
+      '  <div class="' + NS + '-title">' + (opts.title || '') + '</div>' +
+      '  <button type="button" class="' + NS + '-close">&times;</button>' +
+      '</div>' +
+      '<div class="' + NS + '-body"></div>' +
+      '<div class="' + NS + '-resize ' + NS + '-resize-tl" title="Arraste para redimensionar"></div>' +
+      '<div class="' + NS + '-resize ' + NS + '-resize-bl" title="Arraste para redimensionar"></div>';
+    document.body.appendChild(panel);
+
+    var body = panel.querySelector('.' + NS + '-body');
+    var closeBtn = panel.querySelector('.' + NS + '-close');
+
+    function close() {
+      panel.remove();
+      delete openPanels[key];
+    }
+    closeBtn.addEventListener('click', close);
+
+    // Redimensionar arrastando um dos cantos esquerdos: a largura sempre cresce para
+    // a esquerda (o lado direito do popup fica fixo). Pelo canto inferior esquerdo a
+    // altura cresce para baixo (topo fixo); pelo canto superior esquerdo a altura
+    // cresce para cima (o topo sobe, o rodape fica fixo) - util quando o canto
+    // inferior fica fora da tela e nao da pra arrasta-lo. O tamanho fica limitado ao
+    // espaco visivel da janela para o popup nunca ficar inacessivel.
+    function attachResize(handle, growUp) {
+      handle.addEventListener('mousedown', function (ev) {
+        ev.preventDefault();
+        var startX = ev.clientX;
+        var startY = ev.clientY;
+        var startWidth = panel.offsetWidth;
+        var startHeight = panel.offsetHeight;
+        var startTop = panel.offsetTop;
+        var maxWidth = window.innerWidth - 16;
+        var maxHeight = window.innerHeight - 16;
+
+        function onMove(e) {
+          var dx = e.clientX - startX;
+          var dy = e.clientY - startY;
+          var newWidth = Math.min(maxWidth, Math.max(320, startWidth - dx));
+          var rawHeight = growUp ? (startHeight - dy) : (startHeight + dy);
+          var newHeight = Math.min(maxHeight, Math.max(160, rawHeight));
+          panel.style.width = newWidth + 'px';
+          panel.style.height = newHeight + 'px';
+          panel.style.maxHeight = 'none';
+          if (growUp) {
+            panel.style.top = Math.max(8, startTop - (newHeight - startHeight)) + 'px';
+          }
+        }
+        function onUp() {
+          document.removeEventListener('mousemove', onMove);
+          document.removeEventListener('mouseup', onUp);
+        }
+        document.addEventListener('mousemove', onMove);
+        document.addEventListener('mouseup', onUp);
+      });
+    }
+    attachResize(panel.querySelector('.' + NS + '-resize-tl'), true);
+    attachResize(panel.querySelector('.' + NS + '-resize-bl'), false);
+
+    var api = { el: panel, body: body, close: close, key: key };
+    openPanels[key] = api;
+    return api;
+  }
+
+  function setupLog(body) {
+    var log = document.createElement('div');
+    log.className = NS + '-log';
+    body.appendChild(log);
+    return function (msg, cls) {
+      log.classList.add(NS + '-visible');
+      var line = document.createElement('div');
+      if (cls) line.className = cls;
+      line.textContent = msg;
+      log.appendChild(line);
+      log.scrollTop = log.scrollHeight;
+      console.log('[CortecloudTools]', msg);
+    };
+  }
+
+  // ==========================================================================
+  // Ferramenta 1: Copiar modulos entre servicos
+  // ==========================================================================
+
+  var FIELDS_TO_STRIP_MODULE = [
+    'uuid', 'visible', 'exported', 'x', 'y', 'z',
+    'rotx', 'roty', 'rotz', 'createdAt', 'updatedAt', '$$hashKey'
+  ];
+
+  function cleanModuleForCopy(modulo) {
+    var clone = angular.copy(modulo);
+    FIELDS_TO_STRIP_MODULE.forEach(function (k) { delete clone[k]; });
+    return clone;
+  }
+
+  function toolCopiarModulos() {
+    var popup = createPopup({ key: 'copiar-modulos', title: 'Copiar módulos entre serviços', width: 420 });
+    popup.body.innerHTML =
+      '<p class="' + NS + '-sub">Copia todos os módulos de um serviço já configurado para outro serviço.</p>' +
+      '<label class="' + NS + '-field">Número do serviço de ORIGEM (já tem os módulos)</label>' +
+      '<input type="text" class="' + NS + '-input" id="cct-cm-origem" placeholder="ex: 22955734" inputmode="numeric">' +
+      '<label class="' + NS + '-field">Número do serviço de DESTINO (vai receber os módulos)</label>' +
+      '<input type="text" class="' + NS + '-input" id="cct-cm-destino" placeholder="ex: 23239123" inputmode="numeric">' +
+      '<button type="button" class="' + NS + '-btn" id="cct-cm-run">Copiar</button>';
+
+    var log = setupLog(popup.body);
+    var $origem = popup.body.querySelector('#cct-cm-origem');
+    var $destino = popup.body.querySelector('#cct-cm-destino');
+    var $run = popup.body.querySelector('#cct-cm-run');
+    var busy = false, completed = false;
+
+    function setBusy(value, label) {
+      busy = value;
+      $run.disabled = value;
+      $origem.disabled = value;
+      $destino.disabled = value;
+      $run.textContent = label || (value ? 'Copiando...' : 'Copiar');
+    }
+
+    function run(origemId, destinoId) {
+      log('Abrindo serviço de origem #' + origemId + '...');
+      return gotoHash(HASH_PREFIX + origemId, findProjectListScope).then(function (origemScope) {
+        var modulos = origemScope.project.modules;
+        if (!modulos.length) throw new Error('O serviço de origem #' + origemId + ' não tem nenhum módulo.');
+        log('Encontrados ' + modulos.length + ' módulo(s) na origem.');
+        var copias = modulos.map(cleanModuleForCopy);
+
+        log('Abrindo serviço de destino #' + destinoId + '...');
+        return gotoHash(HASH_PREFIX + destinoId, findProjectListScope).then(function (destinoScope) {
+          var injector = angular.element(document.body).injector();
+          var Modulo = injector.get('Modulo');
+          copias.forEach(function (dados, i) {
+            destinoScope.project.modules.push(new Modulo(dados));
+            log('  + [' + (i + 1) + '/' + copias.length + '] ' + (dados.name || dados.id) +
+              (dados.furniture ? ' (' + dados.furniture + ')' : ''));
+          });
+          log('Salvando serviço de destino #' + destinoId + '...');
+          return Promise.resolve(destinoScope.save({ generate: false })).then(function () { return copias.length; });
+        });
+      });
+    }
+
+    $run.addEventListener('click', function () {
+      if (busy) return;
+      if (completed) { popup.close(); return; }
+
+      var origemId = ($origem.value || '').trim();
+      var destinoId = ($destino.value || '').trim();
+      if (!/^\d+$/.test(origemId) || !/^\d+$/.test(destinoId)) { log('Informe apenas números nos dois campos.', NS + '-err'); return; }
+      if (origemId === destinoId) { log('Origem e destino precisam ser serviços diferentes.', NS + '-err'); return; }
+
+      setBusy(true);
+      log('Iniciando cópia de #' + origemId + ' para #' + destinoId + '...');
+      run(origemId, destinoId).then(function (total) {
+        log(total + ' módulo(s) copiado(s) com sucesso para o serviço #' + destinoId + '.', NS + '-ok');
+        log('Revise o serviço de destino: módulos com chapa/fita que não existe na central de destino podem precisar de ajuste manual de material.', NS + '-warn');
+        completed = true;
+        setBusy(false, 'Concluído (clique para fechar)');
+      }).catch(function (err) {
+        log('Erro: ' + (err && err.message ? err.message : err), NS + '-err');
+        setBusy(false, 'Tentar novamente');
+      });
+    });
+
+    $origem.focus();
+  }
+
+  // ==========================================================================
+  // Ferramenta 2: Copiar configuracao de ambiente
+  // ==========================================================================
+
+  var MODULE_POS_FIELDS = [
+    'x', 'y', 'z', 'rotx', 'roty', 'rotz',
+    'xTranslate', 'yTranslate', 'zTranslate',
+    'rotxTranslate', 'rotyTranslate', 'rotzTranslate'
+  ];
+  var MODULE_STATE_FIELDS = ['visible', 'desativar'];
+  var MODULE_COPY_FIELDS = MODULE_POS_FIELDS.concat(MODULE_STATE_FIELDS);
+
+  function toolCopiarAmbiente() {
+    var m = window.location.hash.match(/#\/hellomobweb\/(\d+)\/environment\/([^\/?]+)/);
+    var popup = createPopup({ key: 'copiar-ambiente', title: 'Copiar configuração do ambiente', width: 420 });
+
+    if (!m) {
+      popup.body.innerHTML = '<p class="' + NS + '-sub ' + NS + '-err">Abra a tela "Visualizar ambiente" de um serviço antes de usar esta ferramenta.</p>';
+      return;
+    }
+    var ORIGEM_ID = m[1];
+    var AMBIENTE = decodeURIComponent(m[2]);
+
+    popup.body.innerHTML =
+      '<p class="' + NS + '-sub">Copia dimensões, texturas e posição/visualização dos módulos deste ambiente para outro serviço.</p>' +
+      '<div class="' + NS + '-info">Origem: serviço <b>#' + ORIGEM_ID + '</b> &mdash; ambiente <b>' + AMBIENTE + '</b></div>' +
+      '<label class="' + NS + '-field">Número do serviço de DESTINO (módulos já copiados para lá)</label>' +
+      '<input type="text" class="' + NS + '-input" id="cct-ca-destino" placeholder="ex: 23239123" inputmode="numeric">' +
+      '<button type="button" class="' + NS + '-btn" id="cct-ca-run">Copiar</button>';
+
+    var log = setupLog(popup.body);
+    var $destino = popup.body.querySelector('#cct-ca-destino');
+    var $run = popup.body.querySelector('#cct-ca-run');
+    var busy = false, completed = false;
+
+    function setBusy(value, label) {
+      busy = value;
+      $run.disabled = value;
+      $destino.disabled = value;
+      $run.textContent = label || (value ? 'Copiando...' : 'Copiar');
+    }
+
+    function extractOrigemData() {
+      var envScope = findEnvironmentScope();
+      if (!envScope) throw new Error('Não encontrei os dados do ambiente nesta página. Recarregue a tela "Visualizar ambiente" e tente novamente.');
+      var project = envScope.project;
+      var dimension = project.dimension && project.dimension[AMBIENTE] ? angular.copy(project.dimension[AMBIENTE]) : null;
+      var textures = project.textures && project.textures[AMBIENTE] ? angular.copy(project.textures[AMBIENTE]) : null;
+
+      var positions = {};
+      project.modules.filter(function (mod) { return mod.furniture === AMBIENTE; }).forEach(function (mod) {
+        var pos = {};
+        MODULE_COPY_FIELDS.forEach(function (k) { pos[k] = mod[k]; });
+        positions[mod.name] = pos;
+      });
+
+      var decorations = (project.decorations || []).filter(function (d) { return d.furniture === AMBIENTE; }).map(function (d) {
+        var clone = angular.copy(d);
+        delete clone.uuid;
+        delete clone.$$hashKey;
+        return clone;
+      });
+
+      return { dimension: dimension, textures: textures, positions: positions, decorations: decorations };
+    }
+
+    function applyToDestino(destinoScope, origemData) {
+      var project = destinoScope.project;
+      if (origemData.dimension) {
+        project.dimension = project.dimension || {};
+        project.dimension[AMBIENTE] = origemData.dimension;
+        log('Dimensões do ambiente aplicadas (altura ' + origemData.dimension.altura + 'mm, largura ' +
+          origemData.dimension.largura + 'mm, profundidade ' + origemData.dimension.profundidade + 'mm).');
+      } else {
+        log('Origem não tinha dimensão customizada para "' + AMBIENTE + '"; mantendo padrão no destino.', NS + '-warn');
+      }
+
+      if (origemData.textures) {
+        project.textures = project.textures || {};
+        project.textures[AMBIENTE] = origemData.textures;
+        log('Texturas de chão/teto/parede aplicadas.');
+      }
+
+      var destinoModulos = project.modules.filter(function (mod) { return mod.furniture === AMBIENTE; });
+      if (!destinoModulos.length) log('Nenhum módulo do ambiente "' + AMBIENTE + '" encontrado no destino. Copie os módulos primeiro.', NS + '-err');
+      var aplicados = 0;
+      destinoModulos.forEach(function (mod) {
+        var pos = origemData.positions[mod.name];
+        if (!pos) { log('  ! sem posição de origem para "' + mod.name + '" (não aplicado).', NS + '-warn'); return; }
+        MODULE_COPY_FIELDS.forEach(function (k) { mod[k] = pos[k]; });
+        aplicados++;
+        log('  + posição e visualização aplicadas: ' + mod.name);
+      });
+      log(aplicados + ' de ' + destinoModulos.length + ' módulo(s) do ambiente posicionados e habilitados para visualização.');
+
+      if (origemData.decorations.length) {
+        project.decorations = project.decorations || [];
+        origemData.decorations.forEach(function (d) { project.decorations.push(d); });
+        log(origemData.decorations.length + ' decoração(ões) copiada(s).');
+      }
+    }
+
+    function run(destinoId) {
+      log('Lendo configuração do ambiente "' + AMBIENTE + '" no serviço #' + ORIGEM_ID + '...');
+      var origemData = extractOrigemData();
+      log('Encontrados ' + Object.keys(origemData.positions).length + ' módulo(s) posicionados na origem.');
+      log('Abrindo serviço de destino #' + destinoId + '...');
+      return gotoHash(HASH_PREFIX + destinoId, findProjectListScope).then(function (destinoScope) {
+        applyToDestino(destinoScope, origemData);
+        log('Salvando serviço de destino #' + destinoId + '...');
+        return Promise.resolve(destinoScope.save({ generate: false }));
+      });
+    }
+
+    $run.addEventListener('click', function () {
+      if (busy) return;
+      if (completed) { popup.close(); return; }
+
+      var destinoId = ($destino.value || '').trim();
+      if (!/^\d+$/.test(destinoId)) { log('Informe apenas números no campo de destino.', NS + '-err'); return; }
+      if (destinoId === ORIGEM_ID) { log('Origem e destino precisam ser serviços diferentes.', NS + '-err'); return; }
+
+      setBusy(true);
+      log('Iniciando cópia do ambiente "' + AMBIENTE + '" de #' + ORIGEM_ID + ' para #' + destinoId + '...');
+      run(destinoId).then(function () {
+        log('Ambiente copiado com sucesso para o serviço #' + destinoId + '.', NS + '-ok');
+        completed = true;
+        setBusy(false, 'Concluído (clique para fechar)');
+      }).catch(function (err) {
+        log('Erro: ' + (err && err.message ? err.message : err), NS + '-err');
+        setBusy(false, 'Tentar novamente');
+      });
+    });
+
+    $destino.focus();
+  }
+
+  // ==========================================================================
+  // Ferramenta 3: Pecas do modulo atual
+  // ==========================================================================
+  //
+  // Le as pecas diretamente da arvore de geometria do modulo (module.hash.children),
+  // que e recalculada 100% no navegador (sem chamada ao servidor) toda vez que voce
+  // muda largura/altura/profundidade. Por isso funciona mesmo com o servico ainda em
+  // "Projetando" e reflete edicoes ainda nao salvas - diferente da tela "Lista de
+  // pecas", que so existe depois que os modulos sao finalizados.
+  //
+  // Cada no da arvore tem attributes.lenx/leny/lenz (as 3 dimensoes) e
+  // attributes.produzir (so os nos com produzir "verdadeiro" viram peca de fato; o
+  // resto sao ramos alternativos nao usados). O eixo cujo valor bate com
+  // attributes.espessura e a chapa (descartado); dos outros dois, o maior vira "C" e
+  // o menor vira "L" - validado contra os valores reais da tela "Lista de pecas".
+
+  function extractPecasDoModulo(modulo) {
+    var children = (modulo.hash && modulo.hash.children) || [];
+    return children
+      .filter(function (c) { return c.attributes && c.attributes.produzir; })
+      .map(function (c) {
+        var a = c.attributes;
+        var axes = [a.lenx, a.leny, a.lenz];
+        var espIdx = axes.indexOf(a.espessura);
+        if (espIdx === -1) espIdx = axes.indexOf(Math.min.apply(null, axes));
+        var remaining = axes.filter(function (v, i) { return i !== espIdx; });
+
+        var fitas = [];
+        if (a.fita_afrente) fitas.push('frente');
+        if (a.fita_atras) fitas.push('atrás');
+        if (a.fita_abaixo) fitas.push('abaixo');
+        if (a.fita_acima) fitas.push('acima');
+        if (a.fita_direita) fitas.push('direita');
+        if (a.fita_esquerda) fitas.push('esquerda');
+
+        return {
+          name: c.name,
+          c: Math.max(remaining[0], remaining[1]),
+          l: Math.min(remaining[0], remaining[1]),
+          espessura: a.espessura,
+          fitas: fitas.length ? fitas.join(', ') : '—'
+        };
+      });
+  }
+
+  function toolPecasDoModulo() {
+    var popup = createPopup({ key: 'pecas-modulo', title: 'Peças do módulo', width: 460 });
+
+    var moduloScope = findActiveModuloScope();
+    if (!moduloScope) {
+      popup.body.innerHTML = '<p class="' + NS + '-sub ' + NS + '-err">Abra um módulo para edição (clique nele na tela do serviço) antes de usar esta ferramenta.</p>';
+      return;
+    }
+    var modulo = moduloScope.module;
+
+    popup.body.innerHTML =
+      '<div class="' + NS + '-info">Módulo: <b>' + modulo.name + '</b></div>' +
+      '<p class="' + NS + '-sub">Calculado a partir da geometria atual do módulo (inclui alterações ainda não salvas).</p>' +
+      '<button type="button" class="' + NS + '-btn" id="cct-pm-run">Atualizar peças</button>' +
+      '<div class="' + NS + '-input-wrap">' +
+      '  <input type="text" class="' + NS + '-input" id="cct-pm-filter" placeholder="Filtrar por função...">' +
+      '  <button type="button" class="' + NS + '-input-clear" id="cct-pm-filter-clear" title="Limpar filtro">&times;</button>' +
+      '</div>' +
+      '<div id="cct-pm-table"></div>';
+
+    var $run = popup.body.querySelector('#cct-pm-run');
+    var $table = popup.body.querySelector('#cct-pm-table');
+    var $filter = popup.body.querySelector('#cct-pm-filter');
+    var $filterClear = popup.body.querySelector('#cct-pm-filter-clear');
+    var pecasAtuais = [];
+
+    function renderTable(pecas) {
+      $table.innerHTML = '';
+
+      var info = document.createElement('div');
+      info.className = NS + '-sub';
+      info.textContent = pecas.length + ' peça(s).';
+      $table.appendChild(info);
+
+      var table = document.createElement('table');
+      table.className = NS + '-table';
+      table.innerHTML = '<thead><tr><th>#</th><th>C</th><th>L</th><th>Função</th><th>Fitas</th></tr></thead><tbody></tbody>';
+      $table.appendChild(table);
+      var tbody = table.querySelector('tbody');
+
+      pecas.forEach(function (p, i) {
+        var tr = document.createElement('tr');
+        tr.innerHTML = '<td>' + (i + 1) + '</td><td>' + p.c + '</td><td>' + p.l + '</td><td>' + p.name + '</td><td>' + p.fitas + '</td>';
+        tbody.appendChild(tr);
+      });
+    }
+
+    function applyFilter() {
+      var termo = $filter.value.trim().toLowerCase();
+      if (!termo) { renderTable(pecasAtuais); return; }
+      renderTable(pecasAtuais.filter(function (p) { return p.name.toLowerCase().indexOf(termo) !== -1; }));
+    }
+
+    function buscar() {
+      pecasAtuais = extractPecasDoModulo(modulo);
+      applyFilter();
+    }
+
+    $run.addEventListener('click', buscar);
+    $filter.addEventListener('input', applyFilter);
+    $filterClear.addEventListener('click', function () {
+      $filter.value = '';
+      applyFilter();
+      $filter.focus();
+    });
+
+    buscar();
+  }
+
+  // ==========================================================================
+  // Ferramenta 4: Trocar chapa e fita do modulo
+  // ==========================================================================
+  //
+  // Chapas e fitas disponiveis variam por servico/central, entao a ferramenta nao
+  // busca um catalogo proprio: o usuario escolhe a chapa e a fita desejadas usando o
+  // seletor nativo da Cortecloud (painel "Chapas e fitas") em UMA aplicacao do
+  // modulo (ex: Corpo), e esta ferramenta copia essa escolha para todas as outras
+  // aplicacoes do modulo (Fundo, Divisoria, Tamponamento), usando as mesmas funcoes
+  // internas (definirChapa/definirFita) que o seletor nativo usa - inclusive o
+  // recalculo automatico da geometria. Aplicacoes cuja espessura de chapa/fita
+  // permitida (module.recipe) nao bate com a escolhida sao puladas com aviso, para
+  // nao forcar uma combinacao estruturalmente invalida.
+
+  function toRawMaterial(m) {
+    if (!m || !m.id) return null;
+    return { id: m.id, texture: m.textura, thickness: m.espessura, description: m.descricao, color: m.tag };
+  }
+
+  function toolTrocarMaterial() {
+    var popup = createPopup({ key: 'trocar-material', title: 'Trocar chapa e fita do módulo', width: 440 });
+
+    var moduloScope = findActiveModuloScope();
+    if (!moduloScope || !moduloScope.aplicacoes || typeof moduloScope.definirChapa !== 'function') {
+      popup.body.innerHTML = '<p class="' + NS + '-sub ' + NS + '-err">Abra um módulo para edição (clique nele na tela do serviço) antes de usar esta ferramenta.</p>';
+      return;
+    }
+
+    var aplicacoesKeys = Object.keys(moduloScope.aplicacoes);
+    var options = aplicacoesKeys.map(function (k) {
+      var aplicacao = moduloScope.aplicacoes[k];
+      var nome = aplicacao.nome ? aplicacao.nome.pt : k;
+      return '<option value="' + k + '">' + nome + '</option>';
+    }).join('');
+
+    popup.body.innerHTML =
+      '<p class="' + NS + '-sub">1. No painel "Chapas e fitas" da direita, escolha a chapa e a fita desejadas em uma das aplicações do módulo.<br>2. Selecione aqui de qual aplicação copiar e clique em Aplicar.</p>' +
+      '<label class="' + NS + '-field">Copiar chapa/fita de</label>' +
+      '<select class="' + NS + '-input" id="cct-tm-origem">' + options + '</select>' +
+      '<button type="button" class="' + NS + '-btn" id="cct-tm-run">Aplicar a todas as aplicações do módulo</button>';
+
+    var log = setupLog(popup.body);
+    var $origem = popup.body.querySelector('#cct-tm-origem');
+    var $run = popup.body.querySelector('#cct-tm-run');
+
+    $run.addEventListener('click', function () {
+      var origemKey = $origem.value;
+      var origem = moduloScope.aplicacoes[origemKey];
+      var nomeOrigem = origem.nome ? origem.nome.pt : origemKey;
+      var chapaRaw = toRawMaterial(origem.c);
+      var fitaRaw = toRawMaterial(origem.f);
+
+      if (!chapaRaw && !fitaRaw) {
+        log('A aplicação "' + nomeOrigem + '" ainda não tem chapa nem fita definidas.', NS + '-err');
+        return;
+      }
+
+      var recipeC = moduloScope.recipe && moduloScope.recipe.c;
+      var recipeF = moduloScope.recipe && moduloScope.recipe.f;
+
+      aplicacoesKeys.forEach(function (chave) {
+        var aplicacao = moduloScope.aplicacoes[chave];
+        var nome = aplicacao.nome ? aplicacao.nome.pt : chave;
+        if (chave === origemKey) { log(nome + ': origem, mantido.'); return; }
+
+        var regraC = recipeC && recipeC[chave];
+        if (!chapaRaw) {
+          // sem chapa escolhida, nada a fazer
+        } else if (!regraC) {
+          log(nome + ': chapa não se aplica a esta seção.');
+        } else if (regraC.espessuras && regraC.espessuras.mm && regraC.espessuras.mm.indexOf(chapaRaw.thickness) !== -1) {
+          moduloScope.definirChapa(chave, aplicacao, chapaRaw, false);
+          log(nome + ': chapa aplicada.', NS + '-ok');
+        } else {
+          log(nome + ': chapa NÃO aplicada (espessura ' + chapaRaw.thickness + 'mm incompatível com esta seção).', NS + '-warn');
+        }
+
+        var regraF = recipeF && recipeF[chave];
+        if (!fitaRaw) {
+          // sem fita escolhida, nada a fazer
+        } else if (!regraF) {
+          log(nome + ': fita não se aplica a esta seção.');
+        } else if (regraF.espessuras && regraF.espessuras.indexOf(fitaRaw.thickness) !== -1) {
+          moduloScope.definirFita(chave, aplicacao, fitaRaw, false);
+          log(nome + ': fita aplicada.', NS + '-ok');
+        } else {
+          log(nome + ': fita NÃO aplicada (espessura ' + fitaRaw.thickness + 'mm incompatível com esta seção).', NS + '-warn');
+        }
+      });
+
+      log('Concluído. Confira o resultado e clique em "Salvar" no serviço.', NS + '-ok');
+    });
+  }
+
+  // ==========================================================================
+  // Menu flutuante (launcher)
+  // ==========================================================================
+
+  var oldLauncher = document.querySelector('.' + NS + '-launcher');
+  if (oldLauncher) oldLauncher.remove();
+
+  var launcher = document.createElement('div');
+  launcher.className = NS + '-launcher';
+  launcher.innerHTML =
+    '<div class="' + NS + '-menu">' +
+    '  <div class="' + NS + '-menu-title">Ferramentas Cortecloud</div>' +
+    '  <div class="' + NS + '-menu-item" data-tool="modulos">Copiar módulos entre serviços</div>' +
+    '  <div class="' + NS + '-menu-item" data-tool="ambiente">Copiar configuração de ambiente</div>' +
+    '  <div class="' + NS + '-menu-item" data-tool="pecas">Peças do módulo atual</div>' +
+    '  <div class="' + NS + '-menu-item" data-tool="material">Trocar chapa e fita do módulo</div>' +
+    '</div>' +
+    '<button type="button" class="' + NS + '-launcher-btn" title="Ferramentas Cortecloud">Tools Menu</button>';
+  document.body.appendChild(launcher);
+
+  var menu = launcher.querySelector('.' + NS + '-menu');
+  var btn = launcher.querySelector('.' + NS + '-launcher-btn');
+
+  btn.addEventListener('click', function (ev) {
+    ev.stopPropagation();
+    menu.classList.toggle(NS + '-open');
+  });
+  document.addEventListener('click', function (ev) {
+    if (!launcher.contains(ev.target)) menu.classList.remove(NS + '-open');
+  });
+
+  var TOOLS = { modulos: toolCopiarModulos, ambiente: toolCopiarAmbiente, pecas: toolPecasDoModulo, material: toolTrocarMaterial };
+  menu.querySelectorAll('.' + NS + '-menu-item').forEach(function (item) {
+    item.addEventListener('click', function () {
+      menu.classList.remove(NS + '-open');
+      TOOLS[item.getAttribute('data-tool')]();
+    });
+  });
+})();
