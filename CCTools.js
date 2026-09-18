@@ -269,6 +269,31 @@
     };
   }
 
+  function escapeHtml(str) {
+    return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  }
+
+  // Lista "Meus servicos" do usuario, igual a tela #/plans - funciona de qualquer
+  // pagina, sem precisar navegar ate la primeiro.
+  function fetchServicesList() {
+    var injector = angular.element(document.body).injector();
+    var $http = injector.get('$http');
+    return $http.get('https://api.cortecloud.com.br/api-servicos-carpenter/services/list')
+      .then(function (r) { return r.data; });
+  }
+
+  function serviceOptionLabel(s) {
+    var cliente = s.client ? s.client : '(sem cliente)';
+    if (cliente.length > 55) cliente = cliente.slice(0, 52) + '...';
+    return '#' + s.service + ' — ' + cliente + ' — ' + s.company;
+  }
+
+  function buildServiceOptionsHtml(list) {
+    return list.map(function (s) {
+      return '<option value="' + s.service + '">' + escapeHtml(serviceOptionLabel(s)) + '</option>';
+    }).join('');
+  }
+
   // ==========================================================================
   // Ferramenta 1: Copiar modulos entre servicos
   // ==========================================================================
@@ -284,11 +309,6 @@
     return clone;
   }
 
-  // Slots de material conhecidos pelo painel "Chapas e fitas" (module.preferences.c/f).
-  // Outros slots (ex: chapa_gavetas, chapa_frentes) existem em hash.attributes mas nao
-  // tem um slot equivalente em preferences - so da pra limpar o hash para esses.
-  var KNOWN_APLICACOES = ['corpo', 'fundo', 'divisoria', 'travessas', 'tamponamento'];
-
   function fetchCompanyCatalog(companyId) {
     var injector = angular.element(document.body).injector();
     var $http = injector.get('$http');
@@ -303,16 +323,15 @@
     });
   }
 
-  function limparPreferenciaMaterial(modulo, tipo, chave) {
-    var pref = modulo.preferences && modulo.preferences[tipo];
-    if (pref && pref[chave]) {
-      pref[chave].id = null;
-      pref[chave].textura = null;
-      pref[chave].descricao = null;
-      pref[chave].tag = null;
-    }
-  }
-
+  // A Cortecloud resolve a descricao de cada chapa/fita a partir de
+  // module.preferences.c/f[chave].id (nao de hash.attributes, que e so um cache
+  // derivado) - um id que nao exista no catalogo da central atual trava o carregamento
+  // do modulo com "Cannot read properties of undefined (reading 'description')".
+  // module.preferences.c/f tem um slot por aplicacao do modulo (corpo, fundo, travessas,
+  // divisoria, tamponamento, e em modulos com gaveta tambem gavetas, frentes,
+  // frentesgavetas, fundogavetas, molduraprovencal) - a lista varia por tipo de modulo,
+  // entao percorremos todas as chaves realmente presentes em vez de uma lista fixa.
+  //
   // Remove do modulo clonado qualquer chapa/fita cujo id nao exista no catalogo da
   // central de destino, deixando o slot vazio (mesmo padrao que a Cortecloud ja usa
   // para slots nao definidos) em vez de deixar um id invalido que trava o carregamento
@@ -320,121 +339,128 @@
   function validarMateriaisModulo(modulo, catalog) {
     var avisos = [];
     var attrs = modulo.hash && modulo.hash.attributes;
-    if (!attrs) return avisos;
-    Object.keys(attrs).forEach(function (key) {
-      var val = attrs[key];
-      if (!val) return;
-      var isChapa = key.indexOf('chapa_') === 0;
-      var isFita = key.indexOf('fita_') === 0;
-      if (!isChapa && !isFita) return;
 
-      var valido = isChapa ? catalog.boardIds[val] : catalog.edgeIds[val];
-      if (valido) return;
+    ['c', 'f'].forEach(function (tipo) {
+      var pref = modulo.preferences && modulo.preferences[tipo];
+      if (!pref) return;
+      var catalogMap = tipo === 'c' ? catalog.boardIds : catalog.edgeIds;
 
-      attrs[key] = '';
-      var chave = key.replace(/^chapa_|^fita_/, '');
-      if (KNOWN_APLICACOES.indexOf(chave) !== -1) {
-        limparPreferenciaMaterial(modulo, isChapa ? 'c' : 'f', chave);
-      }
-      avisos.push({
-        modulo: modulo.name,
-        tipo: isChapa ? 'chapa' : 'fita',
-        slot: key,
-        id: val
+      Object.keys(pref).forEach(function (chave) {
+        var entry = pref[chave];
+        if (!entry || !entry.id) return;
+        if (catalogMap[entry.id]) return;
+
+        avisos.push({ modulo: modulo.name, tipo: tipo === 'c' ? 'chapa' : 'fita', slot: chave, id: entry.id });
+
+        entry.id = null;
+        entry.textura = null;
+        entry.descricao = null;
+        entry.tag = null;
+
+        var attrKey = (tipo === 'c' ? 'chapa_' : 'fita_') + chave;
+        if (attrs && attrs[attrKey] !== undefined) attrs[attrKey] = '';
       });
     });
+
     return avisos;
   }
 
   function toolCopiarModulos() {
-    var popup = createPopup({ key: 'copiar-modulos', title: 'Copiar módulos entre serviços', width: 420 });
-    popup.body.innerHTML =
-      '<p class="' + NS + '-sub">Copia todos os módulos de um serviço já configurado para outro serviço.</p>' +
-      '<label class="' + NS + '-field">Número do serviço de ORIGEM (já tem os módulos)</label>' +
-      '<input type="text" class="' + NS + '-input" id="cct-cm-origem" placeholder="ex: 22955734" inputmode="numeric">' +
-      '<label class="' + NS + '-field">Número do serviço de DESTINO (vai receber os módulos)</label>' +
-      '<input type="text" class="' + NS + '-input" id="cct-cm-destino" placeholder="ex: 23239123" inputmode="numeric">' +
-      '<button type="button" class="' + NS + '-btn" id="cct-cm-run">Copiar</button>';
+    var popup = createPopup({ key: 'copiar-modulos', title: 'Copiar módulos entre serviços', width: 460 });
+    popup.body.innerHTML = '<p class="' + NS + '-sub">Carregando lista de serviços...</p>';
 
-    var log = setupLog(popup.body);
-    var $origem = popup.body.querySelector('#cct-cm-origem');
-    var $destino = popup.body.querySelector('#cct-cm-destino');
-    var $run = popup.body.querySelector('#cct-cm-run');
-    var busy = false, completed = false;
+    fetchServicesList().then(function (lista) {
+      var optionsHtml = '<option value="">Selecione um serviço...</option>' + buildServiceOptionsHtml(lista);
 
-    function setBusy(value, label) {
-      busy = value;
-      $run.disabled = value;
-      $origem.disabled = value;
-      $destino.disabled = value;
-      $run.textContent = label || (value ? 'Copiando...' : 'Copiar');
-    }
+      popup.body.innerHTML =
+        '<p class="' + NS + '-sub">Copia todos os módulos de um serviço já configurado para outro serviço.</p>' +
+        '<label class="' + NS + '-field">Serviço de ORIGEM (já tem os módulos)</label>' +
+        '<select class="' + NS + '-input" id="cct-cm-origem">' + optionsHtml + '</select>' +
+        '<label class="' + NS + '-field">Serviço de DESTINO (vai receber os módulos)</label>' +
+        '<select class="' + NS + '-input" id="cct-cm-destino">' + optionsHtml + '</select>' +
+        '<button type="button" class="' + NS + '-btn" id="cct-cm-run">Copiar</button>';
 
-    function run(origemId, destinoId) {
-      log('Abrindo serviço de origem #' + origemId + '...');
-      return gotoHash(HASH_PREFIX + origemId, findProjectListScope).then(function (origemScope) {
-        var modulos = origemScope.project.modules;
-        if (!modulos.length) throw new Error('O serviço de origem #' + origemId + ' não tem nenhum módulo.');
-        log('Encontrados ' + modulos.length + ' módulo(s) na origem.');
-        var copias = modulos.map(cleanModuleForCopy);
+      var log = setupLog(popup.body);
+      var $origem = popup.body.querySelector('#cct-cm-origem');
+      var $destino = popup.body.querySelector('#cct-cm-destino');
+      var $run = popup.body.querySelector('#cct-cm-run');
+      var busy = false, completed = false;
 
-        log('Abrindo serviço de destino #' + destinoId + '...');
-        return gotoHash(HASH_PREFIX + destinoId, findProjectListScope).then(function (destinoScope) {
-          var companyId = destinoScope.project.companyId;
-          log('Consultando catálogo de chapas/fitas da central de destino (empresa #' + companyId + ')...');
+      function setBusy(value, label) {
+        busy = value;
+        $run.disabled = value;
+        $origem.disabled = value;
+        $destino.disabled = value;
+        $run.textContent = label || (value ? 'Copiando...' : 'Copiar');
+      }
 
-          return fetchCompanyCatalog(companyId).then(function (catalog) {
-            var avisos = [];
-            copias.forEach(function (dados) {
-              avisos = avisos.concat(validarMateriaisModulo(dados, catalog));
-            });
+      function run(origemId, destinoId) {
+        log('Abrindo serviço de origem #' + origemId + '...');
+        return gotoHash(HASH_PREFIX + origemId, findProjectListScope).then(function (origemScope) {
+          var modulos = origemScope.project.modules;
+          if (!modulos.length) throw new Error('O serviço de origem #' + origemId + ' não tem nenhum módulo.');
+          log('Encontrados ' + modulos.length + ' módulo(s) na origem.');
+          var copias = modulos.map(cleanModuleForCopy);
 
-            var injector = angular.element(document.body).injector();
-            var Modulo = injector.get('Modulo');
-            copias.forEach(function (dados, i) {
-              destinoScope.project.modules.push(new Modulo(dados));
-              log('  + [' + (i + 1) + '/' + copias.length + '] ' + (dados.name || dados.id) +
-                (dados.furniture ? ' (' + dados.furniture + ')' : ''));
-            });
-            log('Salvando serviço de destino #' + destinoId + '...');
-            return Promise.resolve(destinoScope.save({ generate: false })).then(function () {
-              return { total: copias.length, avisos: avisos };
+          log('Abrindo serviço de destino #' + destinoId + '...');
+          return gotoHash(HASH_PREFIX + destinoId, findProjectListScope).then(function (destinoScope) {
+            var companyId = destinoScope.project.companyId;
+            log('Consultando catálogo de chapas/fitas da central de destino (empresa #' + companyId + ')...');
+
+            return fetchCompanyCatalog(companyId).then(function (catalog) {
+              var avisos = [];
+              copias.forEach(function (dados) {
+                avisos = avisos.concat(validarMateriaisModulo(dados, catalog));
+              });
+
+              var injector = angular.element(document.body).injector();
+              var Modulo = injector.get('Modulo');
+              copias.forEach(function (dados, i) {
+                destinoScope.project.modules.push(new Modulo(dados));
+                log('  + [' + (i + 1) + '/' + copias.length + '] ' + (dados.name || dados.id) +
+                  (dados.furniture ? ' (' + dados.furniture + ')' : ''));
+              });
+              log('Salvando serviço de destino #' + destinoId + '...');
+              return Promise.resolve(destinoScope.save({ generate: false })).then(function () {
+                return { total: copias.length, avisos: avisos };
+              });
             });
           });
         });
+      }
+
+      $run.addEventListener('click', function () {
+        if (busy) return;
+        if (completed) { popup.close(); return; }
+
+        var origemId = $origem.value;
+        var destinoId = $destino.value;
+        if (!origemId || !destinoId) { log('Selecione o serviço de origem e o de destino.', NS + '-err'); return; }
+        if (origemId === destinoId) { log('Origem e destino precisam ser serviços diferentes.', NS + '-err'); return; }
+
+        setBusy(true);
+        log('Iniciando cópia de #' + origemId + ' para #' + destinoId + '...');
+        run(origemId, destinoId).then(function (resultado) {
+          log(resultado.total + ' módulo(s) copiado(s) com sucesso para o serviço #' + destinoId + '.', NS + '-ok');
+          if (resultado.avisos.length) {
+            log(resultado.avisos.length + ' material(is) não existiam na central de destino e foram deixados em branco para reatribuição manual:', NS + '-warn');
+            resultado.avisos.forEach(function (a) {
+              log('  ! ' + a.modulo + ': ' + a.tipo + ' "' + a.slot + '" (id ' + a.id + ' indisponível nesta central)', NS + '-warn');
+            });
+          } else {
+            log('Todos os materiais dos módulos copiados existem na central de destino.', NS + '-ok');
+          }
+          completed = true;
+          setBusy(false, 'Concluído (clique para fechar)');
+        }).catch(function (err) {
+          log('Erro: ' + (err && err.message ? err.message : err), NS + '-err');
+          setBusy(false, 'Tentar novamente');
+        });
       });
-    }
-
-    $run.addEventListener('click', function () {
-      if (busy) return;
-      if (completed) { popup.close(); return; }
-
-      var origemId = ($origem.value || '').trim();
-      var destinoId = ($destino.value || '').trim();
-      if (!/^\d+$/.test(origemId) || !/^\d+$/.test(destinoId)) { log('Informe apenas números nos dois campos.', NS + '-err'); return; }
-      if (origemId === destinoId) { log('Origem e destino precisam ser serviços diferentes.', NS + '-err'); return; }
-
-      setBusy(true);
-      log('Iniciando cópia de #' + origemId + ' para #' + destinoId + '...');
-      run(origemId, destinoId).then(function (resultado) {
-        log(resultado.total + ' módulo(s) copiado(s) com sucesso para o serviço #' + destinoId + '.', NS + '-ok');
-        if (resultado.avisos.length) {
-          log(resultado.avisos.length + ' material(is) não existiam na central de destino e foram deixados em branco para reatribuição manual:', NS + '-warn');
-          resultado.avisos.forEach(function (a) {
-            log('  ! ' + a.modulo + ': ' + a.tipo + ' "' + a.slot + '" (id ' + a.id + ' indisponível nesta central)', NS + '-warn');
-          });
-        } else {
-          log('Todos os materiais dos módulos copiados existem na central de destino.', NS + '-ok');
-        }
-        completed = true;
-        setBusy(false, 'Concluído (clique para fechar)');
-      }).catch(function (err) {
-        log('Erro: ' + (err && err.message ? err.message : err), NS + '-err');
-        setBusy(false, 'Tentar novamente');
-      });
+    }).catch(function (err) {
+      popup.body.innerHTML = '<p class="' + NS + '-sub ' + NS + '-err">Não consegui carregar a lista de serviços: ' +
+        escapeHtml(err && err.message ? err.message : err) + '</p>';
     });
-
-    $origem.focus();
   }
 
   // ==========================================================================
@@ -460,17 +486,9 @@
     var ORIGEM_ID = m[1];
     var AMBIENTE = decodeURIComponent(m[2]);
 
-    popup.body.innerHTML =
-      '<p class="' + NS + '-sub">Copia dimensões, texturas e posição/visualização dos módulos deste ambiente para outro serviço.</p>' +
-      '<div class="' + NS + '-info">Origem: serviço <b>#' + ORIGEM_ID + '</b> &mdash; ambiente <b>' + AMBIENTE + '</b></div>' +
-      '<label class="' + NS + '-field">Número do serviço de DESTINO (módulos já copiados para lá)</label>' +
-      '<input type="text" class="' + NS + '-input" id="cct-ca-destino" placeholder="ex: 23239123" inputmode="numeric">' +
-      '<button type="button" class="' + NS + '-btn" id="cct-ca-run">Copiar</button>';
+    popup.body.innerHTML = '<p class="' + NS + '-sub">Carregando lista de serviços...</p>';
 
-    var log = setupLog(popup.body);
-    var $destino = popup.body.querySelector('#cct-ca-destino');
-    var $run = popup.body.querySelector('#cct-ca-run');
-    var busy = false, completed = false;
+    var log, $destino, $run, busy = false, completed = false;
 
     function setBusy(value, label) {
       busy = value;
@@ -551,27 +569,44 @@
       });
     }
 
-    $run.addEventListener('click', function () {
-      if (busy) return;
-      if (completed) { popup.close(); return; }
+    fetchServicesList().then(function (lista) {
+      var optionsHtml = '<option value="">Selecione um serviço...</option>' +
+        buildServiceOptionsHtml(lista.filter(function (s) { return String(s.service) !== String(ORIGEM_ID); }));
 
-      var destinoId = ($destino.value || '').trim();
-      if (!/^\d+$/.test(destinoId)) { log('Informe apenas números no campo de destino.', NS + '-err'); return; }
-      if (destinoId === ORIGEM_ID) { log('Origem e destino precisam ser serviços diferentes.', NS + '-err'); return; }
+      popup.body.innerHTML =
+        '<p class="' + NS + '-sub">Copia dimensões, texturas e posição/visualização dos módulos deste ambiente para outro serviço.</p>' +
+        '<div class="' + NS + '-info">Origem: serviço <b>#' + ORIGEM_ID + '</b> &mdash; ambiente <b>' + AMBIENTE + '</b></div>' +
+        '<label class="' + NS + '-field">Serviço de DESTINO (módulos já copiados para lá)</label>' +
+        '<select class="' + NS + '-input" id="cct-ca-destino">' + optionsHtml + '</select>' +
+        '<button type="button" class="' + NS + '-btn" id="cct-ca-run">Copiar</button>';
 
-      setBusy(true);
-      log('Iniciando cópia do ambiente "' + AMBIENTE + '" de #' + ORIGEM_ID + ' para #' + destinoId + '...');
-      run(destinoId).then(function () {
-        log('Ambiente copiado com sucesso para o serviço #' + destinoId + '.', NS + '-ok');
-        completed = true;
-        setBusy(false, 'Concluído (clique para fechar)');
-      }).catch(function (err) {
-        log('Erro: ' + (err && err.message ? err.message : err), NS + '-err');
-        setBusy(false, 'Tentar novamente');
+      log = setupLog(popup.body);
+      $destino = popup.body.querySelector('#cct-ca-destino');
+      $run = popup.body.querySelector('#cct-ca-run');
+
+      $run.addEventListener('click', function () {
+        if (busy) return;
+        if (completed) { popup.close(); return; }
+
+        var destinoId = $destino.value;
+        if (!destinoId) { log('Selecione o serviço de destino.', NS + '-err'); return; }
+        if (destinoId === ORIGEM_ID) { log('Origem e destino precisam ser serviços diferentes.', NS + '-err'); return; }
+
+        setBusy(true);
+        log('Iniciando cópia do ambiente "' + AMBIENTE + '" de #' + ORIGEM_ID + ' para #' + destinoId + '...');
+        run(destinoId).then(function () {
+          log('Ambiente copiado com sucesso para o serviço #' + destinoId + '.', NS + '-ok');
+          completed = true;
+          setBusy(false, 'Concluído (clique para fechar)');
+        }).catch(function (err) {
+          log('Erro: ' + (err && err.message ? err.message : err), NS + '-err');
+          setBusy(false, 'Tentar novamente');
+        });
       });
+    }).catch(function (err) {
+      popup.body.innerHTML = '<p class="' + NS + '-sub ' + NS + '-err">Não consegui carregar a lista de serviços: ' +
+        escapeHtml(err && err.message ? err.message : err) + '</p>';
     });
-
-    $destino.focus();
   }
 
   // ==========================================================================
