@@ -22,6 +22,11 @@
  *                                      regra que a Cortecloud usa para o preenchimento automatico
  *                                      nativo, entao secoes como o Fundo ficam de fora (mantidas
  *                                      para edicao manual, ja que normalmente levam chapa diferente).
+ *                                      Cada slot e conferido apos a chamada e tentado uma segunda
+ *                                      vez se nao pegou de primeira - cobre a janela rara em que um
+ *                                      modulo recem-aberto automaticamente ainda nao assentou algum
+ *                                      slot; erro real (2a tentativa tambem falhou) fica visivel no
+ *                                      relatorio, nao passa em silencio.
  *                                      Escopo "Do modulo" (padrao) afeta so o modulo aberto - a
  *                                      alteracao fica so na sessao, o usuario confere e salva
  *                                      manualmente pelo botao "Salvar" do proprio modulo.
@@ -817,9 +822,25 @@
   // edicao (moduloScope precisa ter aplicacoes/recipe/definirChapa/definirFita).
   // skipKey, se informado, pula essa aplicacao (usado para nao reaplicar na
   // propria aplicacao de onde o material foi lido).
+  //
+  // NOTA: o app tem seu proprio "preenchimento automatico" nativo (4o argumento
+  // "propagate" de definirChapa/definirFita) que copia o valor do Corpo para os
+  // demais slots elegiveis - mas so quando esses slots ainda estao vazios; ele
+  // NAO sobrescreve um slot que ja tem outro material (testado ao vivo). Como o
+  // objetivo desta ferramenta e justamente TROCAR material em modulos ja
+  // configurados, ela continua aplicando slot a slot com propagate=false (forca
+  // a troca em qualquer estado anterior) em vez de depender desse mecanismo.
   function aplicarMaterialEmModulo(moduloScope, chapaRaw, fitaRaw, skipKey, log, moduloLabel) {
     var recipeC = moduloScope.recipe && moduloScope.recipe.c;
     var recipeF = moduloScope.recipe && moduloScope.recipe.f;
+    var root = moduloScope.$root;
+    function digerir() { if (root && !root.$$phase) { root.$digest(); } }
+
+    // Um modulo recem-aberto (via abertura automatica desta ferramenta) pode
+    // ainda ter algum slot (ex. Prateleira) terminando de assentar seu proprio
+    // estado inicial; um digest aqui, antes de aplicar qualquer coisa, evita
+    // que a primeira tentativa caia numa janela transitoria.
+    digerir();
 
     Object.keys(moduloScope.aplicacoes).forEach(function (chave) {
       var aplicacao = moduloScope.aplicacoes[chave];
@@ -838,7 +859,17 @@
         log(nome + ': chapa não se aplica a esta seção.');
       } else if (regraC.espessuras && regraC.espessuras.mm && regraC.espessuras.mm.indexOf(chapaRaw.thickness) !== -1) {
         moduloScope.definirChapa(chave, aplicacao, chapaRaw, false);
-        log(nome + ': chapa aplicada.', NS + '-ok');
+        if (!aplicacao.c || aplicacao.c.id !== chapaRaw.id) {
+          // nao pegou de primeira - tenta mais uma vez apos assentar o digest
+          // (cobre a mesma janela transitoria de um modulo recem-aberto)
+          digerir();
+          moduloScope.definirChapa(chave, aplicacao, chapaRaw, false);
+        }
+        if (aplicacao.c && aplicacao.c.id === chapaRaw.id) {
+          log(nome + ': chapa aplicada.', NS + '-ok');
+        } else {
+          log(nome + ': chapa NÃO foi aplicada mesmo após nova tentativa - confira manualmente.', NS + '-err');
+        }
       } else {
         log(nome + ': chapa NÃO aplicada (espessura ' + chapaRaw.thickness + 'mm incompatível com esta seção).', NS + '-warn');
       }
@@ -850,7 +881,15 @@
         log(nome + ': fita não se aplica a esta seção.');
       } else if (regraF.espessuras && regraF.espessuras.indexOf(fitaRaw.thickness) !== -1) {
         moduloScope.definirFita(chave, aplicacao, fitaRaw, false);
-        log(nome + ': fita aplicada.', NS + '-ok');
+        if (!aplicacao.f || aplicacao.f.id !== fitaRaw.id) {
+          digerir();
+          moduloScope.definirFita(chave, aplicacao, fitaRaw, false);
+        }
+        if (aplicacao.f && aplicacao.f.id === fitaRaw.id) {
+          log(nome + ': fita aplicada.', NS + '-ok');
+        } else {
+          log(nome + ': fita NÃO foi aplicada mesmo após nova tentativa - confira manualmente.', NS + '-err');
+        }
       } else {
         log(nome + ': fita NÃO aplicada (espessura ' + fitaRaw.thickness + 'mm incompatível com esta seção).', NS + '-warn');
       }
@@ -860,11 +899,11 @@
     // real do usuario (sem passar pelo ng-click nativo), entao o Angular so
     // atualizaria a interface - inclusive o estado habilitado/desabilitado do
     // botao "Salvar" - no proximo digest espontaneo. Forcamos esse digest uma
-    // unica vez, depois que TODAS as aplicacoes do modulo ja foram processadas,
-    // para garantir que o botao so seja considerado (e clicado) depois que a
-    // troca de chapa/fita estiver de fato refletida no estado do modulo.
-    var root = moduloScope.$root;
-    if (root && !root.$$phase) { root.$digest(); }
+    // unica vez mais, depois que TODAS as aplicacoes do modulo ja foram
+    // processadas, para garantir que o botao so seja considerado (e clicado)
+    // depois que a troca de chapa/fita estiver de fato refletida no estado do
+    // modulo.
+    digerir();
   }
 
   function findModuloScopeByUuid(uuid) {
