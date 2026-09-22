@@ -16,8 +16,11 @@
  *  2. Copiar configuracao de ambiente (substitui CopiarAmbiente.js)
  *  3. Pecas do modulo atual           (novo - lista as pecas do modulo aberto para edicao,
  *                                      calculadas localmente a partir da geometria do modulo)
- *  4. Trocar chapa e fita do modulo   (novo - copia a chapa/fita escolhida numa aplicacao do
- *                                      modulo, ex. Corpo, para todas as outras aplicacoes)
+ *  4. Trocar chapa e fita          (novo - copia a chapa/fita escolhida numa aplicacao do
+ *                                      modulo atual, ex. Corpo, para todas as outras aplicacoes.
+ *                                      Escopo "Do modulo" (padrao) afeta so o modulo aberto;
+ *                                      escopo "Do ambiente" aplica em todos os modulos do
+ *                                      mesmo ambiente, abrindo cada um automaticamente)
  *  5. Limpar modulos do servico       (novo - apaga todos os modulos de um servico escolhido,
  *                                      com confirmacao mostrando quantos serao removidos - util
  *                                      antes de recopiar tudo depois de ajustar a origem)
@@ -787,8 +790,85 @@
     return { id: m.id, texture: m.textura, thickness: m.espessura, description: m.descricao, color: m.tag };
   }
 
+  // Aplica chapaRaw/fitaRaw a todas as aplicacoes de UM modulo ja aberto para
+  // edicao (moduloScope precisa ter aplicacoes/recipe/definirChapa/definirFita).
+  // skipKey, se informado, pula essa aplicacao (usado para nao reaplicar na
+  // propria aplicacao de onde o material foi lido).
+  function aplicarMaterialEmModulo(moduloScope, chapaRaw, fitaRaw, skipKey, log, moduloLabel) {
+    var recipeC = moduloScope.recipe && moduloScope.recipe.c;
+    var recipeF = moduloScope.recipe && moduloScope.recipe.f;
+
+    Object.keys(moduloScope.aplicacoes).forEach(function (chave) {
+      var aplicacao = moduloScope.aplicacoes[chave];
+      var nome = moduloLabel + ' — ' + (aplicacao.nome ? aplicacao.nome.pt : chave);
+      if (chave === skipKey) { log(nome + ': origem, mantido.'); return; }
+
+      var regraC = recipeC && recipeC[chave];
+      if (!chapaRaw) {
+        // sem chapa escolhida, nada a fazer
+      } else if (!regraC) {
+        log(nome + ': chapa não se aplica a esta seção.');
+      } else if (regraC.espessuras && regraC.espessuras.mm && regraC.espessuras.mm.indexOf(chapaRaw.thickness) !== -1) {
+        moduloScope.definirChapa(chave, aplicacao, chapaRaw, false);
+        log(nome + ': chapa aplicada.', NS + '-ok');
+      } else {
+        log(nome + ': chapa NÃO aplicada (espessura ' + chapaRaw.thickness + 'mm incompatível com esta seção).', NS + '-warn');
+      }
+
+      var regraF = recipeF && recipeF[chave];
+      if (!fitaRaw) {
+        // sem fita escolhida, nada a fazer
+      } else if (!regraF) {
+        log(nome + ': fita não se aplica a esta seção.');
+      } else if (regraF.espessuras && regraF.espessuras.indexOf(fitaRaw.thickness) !== -1) {
+        moduloScope.definirFita(chave, aplicacao, fitaRaw, false);
+        log(nome + ': fita aplicada.', NS + '-ok');
+      } else {
+        log(nome + ': fita NÃO aplicada (espessura ' + fitaRaw.thickness + 'mm incompatível com esta seção).', NS + '-warn');
+      }
+    });
+  }
+
+  function findModuloScopeByUuid(uuid) {
+    var all = document.querySelectorAll('*');
+    for (var i = 0; i < all.length; i++) {
+      var el = all[i];
+      var texto = el.children.length === 0 ? el.textContent.trim() : '';
+      if (texto === 'Dimensões' || texto === 'Dimensoes') {
+        var s = angular.element(el).scope();
+        while (s && !s.module) s = s.$parent;
+        if (s && s.module && s.module.uuid === uuid) return s;
+      }
+    }
+    return null;
+  }
+
+  // Abre um modulo para edicao clicando na sua linha da lista (se ainda nao
+  // estiver aberto) e aguarda o painel de edicao (com aplicacoes/definirChapa)
+  // ficar disponivel para aquele modulo especifico.
+  function openModuloParaEdicao(uuid, timeoutMs) {
+    timeoutMs = timeoutMs || 15000;
+    var jaAberto = findModuloScopeByUuid(uuid);
+    if (jaAberto) return Promise.resolve(jaAberto);
+
+    var row = Array.from(document.querySelectorAll('.modulo')).find(function (el) {
+      var s = angular.element(el).scope();
+      return s && s.modulo && s.modulo.uuid === uuid;
+    });
+    if (!row) return Promise.reject(new Error('Não encontrei a linha deste módulo na lista.'));
+    row.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+
+    var start = Date.now();
+    return sleep(500).then(function poll() {
+      var s = findModuloScopeByUuid(uuid);
+      if (s) return s;
+      if (Date.now() - start > timeoutMs) throw new Error('Tempo esgotado abrindo o módulo para edição.');
+      return sleep(300).then(poll);
+    });
+  }
+
   function toolTrocarMaterial() {
-    var popup = createPopup({ key: 'trocar-material', title: 'Trocar chapa e fita do módulo', width: 440 });
+    var popup = createPopup({ key: 'trocar-material', title: 'Trocar chapa e fita', width: 460 });
 
     var moduloScope = findActiveModuloScope();
     if (!moduloScope || !moduloScope.aplicacoes || typeof moduloScope.definirChapa !== 'function') {
@@ -797,23 +877,56 @@
     }
 
     var aplicacoesKeys = Object.keys(moduloScope.aplicacoes);
-    var options = aplicacoesKeys.map(function (k) {
+    var origemOptions = aplicacoesKeys.map(function (k) {
       var aplicacao = moduloScope.aplicacoes[k];
       var nome = aplicacao.nome ? aplicacao.nome.pt : k;
       return '<option value="' + k + '">' + nome + '</option>';
     }).join('');
 
+    var projScope = findProjectListScope();
+    var ambienteAtual = moduloScope.module.furniture;
+    var ambientesOptions = '';
+    if (projScope) {
+      var vistos = {};
+      var ambientes = [];
+      projScope.project.modules.forEach(function (m) {
+        if (m.furniture && !vistos[m.furniture]) { vistos[m.furniture] = true; ambientes.push(m.furniture); }
+      });
+      ambientesOptions = ambientes.map(function (a) {
+        return '<option value="' + escapeHtml(a) + '"' + (a === ambienteAtual ? ' selected' : '') + '>' + escapeHtml(a) + '</option>';
+      }).join('');
+    }
+
     popup.body.innerHTML =
-      '<p class="' + NS + '-sub">1. No painel "Chapas e fitas" da direita, escolha a chapa e a fita desejadas em uma das aplicações do módulo.<br>2. Selecione aqui de qual aplicação copiar e clique em Aplicar.</p>' +
+      '<p class="' + NS + '-sub">1. No painel "Chapas e fitas" da direita, escolha a chapa e a fita desejadas em uma das aplicações do módulo atual.<br>2. Escolha o escopo e clique em Aplicar.</p>' +
       '<label class="' + NS + '-field">Copiar chapa/fita de</label>' +
-      '<select class="' + NS + '-input" id="cct-tm-origem">' + options + '</select>' +
-      '<button type="button" class="' + NS + '-btn" id="cct-tm-run">Aplicar a todas as aplicações do módulo</button>';
+      '<select class="' + NS + '-input" id="cct-tm-origem">' + origemOptions + '</select>' +
+      '<label class="' + NS + '-field">Aplicar em</label>' +
+      '<select class="' + NS + '-input" id="cct-tm-escopo">' +
+      '  <option value="modulo">Do módulo (só este módulo)</option>' +
+      '  <option value="ambiente">Do ambiente (todos os módulos do ambiente)</option>' +
+      '</select>' +
+      '<div id="cct-tm-ambiente-wrap" style="display:none;">' +
+      '  <label class="' + NS + '-field">Ambiente</label>' +
+      '  <select class="' + NS + '-input" id="cct-tm-ambiente">' + ambientesOptions + '</select>' +
+      '</div>' +
+      '<button type="button" class="' + NS + '-btn" id="cct-tm-run">Aplicar</button>';
 
     var log = setupLog(popup.body);
     var $origem = popup.body.querySelector('#cct-tm-origem');
+    var $escopo = popup.body.querySelector('#cct-tm-escopo');
+    var $ambienteWrap = popup.body.querySelector('#cct-tm-ambiente-wrap');
+    var $ambiente = popup.body.querySelector('#cct-tm-ambiente');
     var $run = popup.body.querySelector('#cct-tm-run');
+    var busy = false;
+
+    $escopo.addEventListener('change', function () {
+      $ambienteWrap.style.display = $escopo.value === 'ambiente' ? 'block' : 'none';
+    });
 
     $run.addEventListener('click', function () {
+      if (busy) return;
+
       var origemKey = $origem.value;
       var origem = moduloScope.aplicacoes[origemKey];
       var nomeOrigem = origem.nome ? origem.nome.pt : origemKey;
@@ -825,40 +938,54 @@
         return;
       }
 
-      var recipeC = moduloScope.recipe && moduloScope.recipe.c;
-      var recipeF = moduloScope.recipe && moduloScope.recipe.f;
+      if ($escopo.value === 'modulo') {
+        aplicarMaterialEmModulo(moduloScope, chapaRaw, fitaRaw, origemKey, log, moduloScope.module.name);
+        log('Concluído. Confira o resultado e clique em "Salvar" no serviço.', NS + '-ok');
+        return;
+      }
 
-      aplicacoesKeys.forEach(function (chave) {
-        var aplicacao = moduloScope.aplicacoes[chave];
-        var nome = aplicacao.nome ? aplicacao.nome.pt : chave;
-        if (chave === origemKey) { log(nome + ': origem, mantido.'); return; }
+      // Escopo "ambiente": aplica em todos os modulos daquele ambiente, abrindo
+      // cada um para edicao (um de cada vez) e salvando tudo ao final em uma
+      // unica chamada de save do projeto.
+      var ambienteSelecionado = $ambiente.value;
+      if (!ambienteSelecionado) { log('Selecione o ambiente.', NS + '-err'); return; }
+      if (!projScope) { log('Não encontrei a lista de módulos deste serviço.', NS + '-err'); return; }
 
-        var regraC = recipeC && recipeC[chave];
-        if (!chapaRaw) {
-          // sem chapa escolhida, nada a fazer
-        } else if (!regraC) {
-          log(nome + ': chapa não se aplica a esta seção.');
-        } else if (regraC.espessuras && regraC.espessuras.mm && regraC.espessuras.mm.indexOf(chapaRaw.thickness) !== -1) {
-          moduloScope.definirChapa(chave, aplicacao, chapaRaw, false);
-          log(nome + ': chapa aplicada.', NS + '-ok');
-        } else {
-          log(nome + ': chapa NÃO aplicada (espessura ' + chapaRaw.thickness + 'mm incompatível com esta seção).', NS + '-warn');
-        }
+      var currentUuid = moduloScope.module.uuid;
+      var modulosDoAmbiente = projScope.project.modules.filter(function (m) { return m.furniture === ambienteSelecionado; });
+      if (!modulosDoAmbiente.length) { log('Nenhum módulo encontrado no ambiente "' + ambienteSelecionado + '".', NS + '-err'); return; }
 
-        var regraF = recipeF && recipeF[chave];
-        if (!fitaRaw) {
-          // sem fita escolhida, nada a fazer
-        } else if (!regraF) {
-          log(nome + ': fita não se aplica a esta seção.');
-        } else if (regraF.espessuras && regraF.espessuras.indexOf(fitaRaw.thickness) !== -1) {
-          moduloScope.definirFita(chave, aplicacao, fitaRaw, false);
-          log(nome + ': fita aplicada.', NS + '-ok');
-        } else {
-          log(nome + ': fita NÃO aplicada (espessura ' + fitaRaw.thickness + 'mm incompatível com esta seção).', NS + '-warn');
-        }
+      busy = true;
+      $run.disabled = true;
+      $run.textContent = 'Aplicando...';
+      log('Aplicando a ' + modulosDoAmbiente.length + ' módulo(s) do ambiente "' + ambienteSelecionado + '"...');
+
+      modulosDoAmbiente.reduce(function (promise, m) {
+        return promise.then(function () {
+          if (m.uuid === currentUuid) {
+            aplicarMaterialEmModulo(moduloScope, chapaRaw, fitaRaw, origemKey, log, m.name);
+            return;
+          }
+          return openModuloParaEdicao(m.uuid).then(function (outroScope) {
+            aplicarMaterialEmModulo(outroScope, chapaRaw, fitaRaw, null, log, m.name);
+          }).catch(function (err) {
+            log(m.name + ': erro ao abrir para edição (' + (err && err.message ? err.message : err) + ').', NS + '-err');
+          });
+        });
+      }, Promise.resolve()).then(function () {
+        log('Salvando o serviço...');
+        return Promise.resolve(projScope.save({ generate: false }));
+      }).then(function () {
+        log('Concluído: material aplicado e salvo em todos os módulos do ambiente "' + ambienteSelecionado + '".', NS + '-ok');
+        busy = false;
+        $run.disabled = false;
+        $run.textContent = 'Aplicar';
+      }).catch(function (err) {
+        log('Erro: ' + (err && err.message ? err.message : err), NS + '-err');
+        busy = false;
+        $run.disabled = false;
+        $run.textContent = 'Aplicar';
       });
-
-      log('Concluído. Confira o resultado e clique em "Salvar" no serviço.', NS + '-ok');
     });
   }
 
@@ -965,7 +1092,7 @@
     '  <div class="' + NS + '-menu-item" data-tool="modulos">Copiar módulos entre serviços</div>' +
     '  <div class="' + NS + '-menu-item" data-tool="ambiente">Copiar configuração de ambiente</div>' +
     '  <div class="' + NS + '-menu-item" data-tool="pecas">Peças do módulo atual</div>' +
-    '  <div class="' + NS + '-menu-item" data-tool="material">Trocar chapa e fita do módulo</div>' +
+    '  <div class="' + NS + '-menu-item" data-tool="material">Trocar chapa e fita</div>' +
     '  <div class="' + NS + '-menu-item" data-tool="limpar">Limpar módulos do serviço</div>' +
     '</div>' +
     '<button type="button" class="' + NS + '-launcher-btn" title="Ferramentas Cortecloud">Tools Menu</button>';
