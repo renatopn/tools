@@ -17,7 +17,11 @@
  *  3. Pecas do modulo atual           (novo - lista as pecas do modulo aberto para edicao,
  *                                      calculadas localmente a partir da geometria do modulo)
  *  4. Trocar chapa e fita          (novo - copia a chapa/fita escolhida numa aplicacao do
- *                                      modulo atual, ex. Corpo, para todas as outras aplicacoes.
+ *                                      modulo atual, ex. Corpo, para as demais aplicacoes cujo
+ *                                      recipe.preenchimento_automatico nao seja false - mesma
+ *                                      regra que a Cortecloud usa para o preenchimento automatico
+ *                                      nativo, entao secoes como o Fundo ficam de fora (mantidas
+ *                                      para edicao manual, ja que normalmente levam chapa diferente).
  *                                      Escopo "Do modulo" (padrao) afeta so o modulo aberto - a
  *                                      alteracao fica so na sessao, o usuario confere e salva
  *                                      manualmente pelo botao "Salvar" do proprio modulo.
@@ -792,6 +796,17 @@
   // recalculo automatico da geometria. Aplicacoes cuja espessura de chapa/fita
   // permitida (module.recipe) nao bate com a escolhida sao puladas com aviso, para
   // nao forcar uma combinacao estruturalmente invalida.
+  //
+  // Tambem e pulada (mantida para edicao manual) qualquer aplicacao cujo
+  // module.recipe.c[chave].preenchimento_automatico seja false - essa e a mesma
+  // flag que a propria Cortecloud usa para decidir quais secoes herdam a chapa/
+  // fita do Corpo automaticamente quando ele e definido pela primeira vez
+  // (confirmado observando o app ao vivo: ele propaga para Tamponamento e
+  // Prateleira, mas nunca para o Fundo, mesmo quando a espessura seria
+  // compativel - o Fundo normalmente leva uma chapa diferente e mais barata).
+  // Reproduzir essa mesma regra aqui garante que a ferramenta se comporte
+  // exatamente como o preenchimento automatico nativo, em vez de forcar o
+  // material tambem em secoes que a Cortecloud deliberadamente deixa de fora.
 
   function toRawMaterial(m) {
     if (!m || !m.id) return null;
@@ -812,6 +827,11 @@
       if (chave === skipKey) { log(nome + ': origem, mantido.'); return; }
 
       var regraC = recipeC && recipeC[chave];
+      if (regraC && regraC.preenchimento_automatico === false) {
+        log(nome + ': fora do preenchimento automático (igual ao comportamento nativo), mantido para edição manual.');
+        return;
+      }
+
       if (!chapaRaw) {
         // sem chapa escolhida, nada a fazer
       } else if (!regraC) {
