@@ -18,9 +18,14 @@
  *                                      calculadas localmente a partir da geometria do modulo)
  *  4. Trocar chapa e fita          (novo - copia a chapa/fita escolhida numa aplicacao do
  *                                      modulo atual, ex. Corpo, para todas as outras aplicacoes.
- *                                      Escopo "Do modulo" (padrao) afeta so o modulo aberto;
- *                                      escopo "Do ambiente" aplica em todos os modulos do
- *                                      mesmo ambiente, abrindo cada um automaticamente)
+ *                                      Escopo "Do modulo" (padrao) afeta so o modulo aberto - a
+ *                                      alteracao fica so na sessao, o usuario confere e salva
+ *                                      manualmente pelo botao "Salvar" do proprio modulo.
+ *                                      Escopo "Do ambiente" aplica em todos os modulos do mesmo
+ *                                      ambiente, abrindo cada um automaticamente e clicando no
+ *                                      "Salvar" real de cada modulo antes de seguir para o
+ *                                      proximo - necessario porque a alteracao nao persiste se
+ *                                      o modulo nao for salvo antes de trocar de modulo)
  *  5. Limpar modulos do servico       (novo - apaga todos os modulos de um servico escolhido,
  *                                      com confirmacao mostrando quantos serao removidos - util
  *                                      antes de recopiar tudo depois de ajustar a origem)
@@ -867,6 +872,39 @@
     });
   }
 
+  function findSalvarButtonForUuid(uuid) {
+    return Array.from(document.querySelectorAll('button')).find(function (b) {
+      if (b.textContent.trim() !== 'Salvar') return false;
+      var s = angular.element(b).scope();
+      return s && s.module && s.module.uuid === uuid;
+    });
+  }
+
+  // Clica no botao "Salvar" real do painel de edicao do modulo (nao chama a
+  // funcao direto, porque ela abre um modal de aviso em alguns casos, e clicar
+  // no botao de verdade segue o mesmo caminho que um clique manual). Sem isso,
+  // a troca de chapa/fita fica so na sessao e nao e persistida ao abrir o
+  // proximo modulo. O botao tambem fecha o painel ao terminar, o que evita
+  // acumular paineis de modulos diferentes abertos ao mesmo tempo.
+  function salvarEFecharModulo(scope, timeoutMs) {
+    timeoutMs = timeoutMs || 15000;
+    if (scope.module.necessarioAtualizar) {
+      return Promise.reject(new Error('módulo "' + scope.module.name + '" está desatualizado; abra-o manualmente e atualize antes de usar esta ferramenta.'));
+    }
+    var uuid = scope.module.uuid;
+    var btn = findSalvarButtonForUuid(uuid);
+    if (!btn) return Promise.reject(new Error('não encontrei o botão "Salvar" deste módulo.'));
+    if (btn.disabled) return Promise.reject(new Error('o botão "Salvar" deste módulo está desabilitado no momento.'));
+    btn.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+
+    var start = Date.now();
+    return sleep(500).then(function poll() {
+      if (!findModuloScopeByUuid(uuid)) return true;
+      if (Date.now() - start > timeoutMs) throw new Error('tempo esgotado esperando salvar/fechar o módulo.');
+      return sleep(300).then(poll);
+    });
+  }
+
   function toolTrocarMaterial() {
     var popup = createPopup({ key: 'trocar-material', title: 'Trocar chapa e fita', width: 460 });
 
@@ -962,14 +1000,14 @@
 
       modulosDoAmbiente.reduce(function (promise, m) {
         return promise.then(function () {
-          if (m.uuid === currentUuid) {
-            aplicarMaterialEmModulo(moduloScope, chapaRaw, fitaRaw, origemKey, log, m.name);
-            return;
-          }
-          return openModuloParaEdicao(m.uuid).then(function (outroScope) {
-            aplicarMaterialEmModulo(outroScope, chapaRaw, fitaRaw, null, log, m.name);
+          var ehAtual = m.uuid === currentUuid;
+          var scopePromise = ehAtual ? Promise.resolve(moduloScope) : openModuloParaEdicao(m.uuid);
+          return scopePromise.then(function (scope) {
+            aplicarMaterialEmModulo(scope, chapaRaw, fitaRaw, ehAtual ? origemKey : null, log, m.name);
+            log('Salvando módulo "' + m.name + '"...');
+            return salvarEFecharModulo(scope);
           }).catch(function (err) {
-            log(m.name + ': erro ao abrir para edição (' + (err && err.message ? err.message : err) + ').', NS + '-err');
+            log(m.name + ': ' + (err && err.message ? err.message : err), NS + '-err');
           });
         });
       }, Promise.resolve()).then(function () {
