@@ -22,10 +22,13 @@
  *                                      alteracao fica so na sessao, o usuario confere e salva
  *                                      manualmente pelo botao "Salvar" do proprio modulo.
  *                                      Escopo "Do ambiente" aplica em todos os modulos do mesmo
- *                                      ambiente, abrindo cada um automaticamente e clicando no
- *                                      "Salvar" real de cada modulo antes de seguir para o
- *                                      proximo - necessario porque a alteracao nao persiste se
- *                                      o modulo nao for salvo antes de trocar de modulo)
+ *                                      ambiente, abrindo cada um automaticamente; so depois que
+ *                                      TODAS as chapas/fitas daquele modulo ja foram alteradas
+ *                                      (com o digest do Angular forcado nesse ponto) e o botao
+ *                                      "Salvar" real fica habilitado - aguardando se preciso -
+ *                                      ele e clicado antes de seguir para o proximo modulo,
+ *                                      necessario porque a alteracao nao persiste se o modulo
+ *                                      nao for salvo antes de trocar de modulo)
  *  5. Limpar modulos do servico       (novo - apaga todos os modulos de um servico escolhido,
  *                                      com confirmacao mostrando quantos serao removidos - util
  *                                      antes de recopiar tudo depois de ajustar a origem)
@@ -832,6 +835,16 @@
         log(nome + ': fita NÃO aplicada (espessura ' + fitaRaw.thickness + 'mm incompatível com esta seção).', NS + '-warn');
       }
     });
+
+    // definirChapa/definirFita sao chamadas diretamente aqui, fora de um clique
+    // real do usuario (sem passar pelo ng-click nativo), entao o Angular so
+    // atualizaria a interface - inclusive o estado habilitado/desabilitado do
+    // botao "Salvar" - no proximo digest espontaneo. Forcamos esse digest uma
+    // unica vez, depois que TODAS as aplicacoes do modulo ja foram processadas,
+    // para garantir que o botao so seja considerado (e clicado) depois que a
+    // troca de chapa/fita estiver de fato refletida no estado do modulo.
+    var root = moduloScope.$root;
+    if (root && !root.$$phase) { root.$digest(); }
   }
 
   function findModuloScopeByUuid(uuid) {
@@ -892,16 +905,30 @@
       return Promise.reject(new Error('módulo "' + scope.module.name + '" está desatualizado; abra-o manualmente e atualize antes de usar esta ferramenta.'));
     }
     var uuid = scope.module.uuid;
-    var btn = findSalvarButtonForUuid(uuid);
-    if (!btn) return Promise.reject(new Error('não encontrei o botão "Salvar" deste módulo.'));
-    if (btn.disabled) return Promise.reject(new Error('o botão "Salvar" deste módulo está desabilitado no momento.'));
-    btn.dispatchEvent(new MouseEvent('click', { bubbles: true }));
 
-    var start = Date.now();
-    return sleep(500).then(function poll() {
-      if (!findModuloScopeByUuid(uuid)) return true;
-      if (Date.now() - start > timeoutMs) throw new Error('tempo esgotado esperando salvar/fechar o módulo.');
-      return sleep(300).then(poll);
+    // O botao "Salvar" fica desabilitado enquanto o Angular ainda esta
+    // processando a mudanca (ex. logo apos definirChapa/definirFita). Em vez
+    // de falhar na hora, aguarda ele ficar habilitado ate o timeout.
+    var esperaHabilitarStart = Date.now();
+    function aguardarBotaoHabilitado() {
+      var btn = findSalvarButtonForUuid(uuid);
+      if (!btn) return Promise.reject(new Error('não encontrei o botão "Salvar" deste módulo.'));
+      if (!btn.disabled) return Promise.resolve(btn);
+      if (Date.now() - esperaHabilitarStart > timeoutMs) {
+        return Promise.reject(new Error('tempo esgotado aguardando o botão "Salvar" deste módulo ficar habilitado.'));
+      }
+      return sleep(300).then(aguardarBotaoHabilitado);
+    }
+
+    return aguardarBotaoHabilitado().then(function (btn) {
+      btn.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+
+      var fecharStart = Date.now();
+      return sleep(500).then(function poll() {
+        if (!findModuloScopeByUuid(uuid)) return true;
+        if (Date.now() - fecharStart > timeoutMs) throw new Error('tempo esgotado esperando salvar/fechar o módulo.');
+        return sleep(300).then(poll);
+      });
     });
   }
 
